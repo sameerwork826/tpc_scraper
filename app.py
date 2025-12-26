@@ -11,6 +11,36 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
 from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy import stats
+import numpy as np
+
+# Load data for CPI Visualizer
+@st.cache_data
+def load_cpi_data():
+    try:
+        # Use skipinitialspace=True to handle CSV formatting issues
+        df = pd.read_csv('alot_LM (2).csv', skipinitialspace=True)
+        df = df[['email', 'rollno', 'cpi']]
+        
+        with open('branch_mapping.json', 'r') as f:
+            mapping = json.load(f)
+        email_codes = mapping['email_codes']
+        
+        def extract_branch(email):
+            import re
+            user_part = str(email).split('@')[0]
+            match = re.search(r'\.([a-z]{2,4})(\d{2})$', user_part)
+            if match:
+                b_code = match.group(1).lower()
+                return email_codes.get(b_code, b_code.upper())
+            return 'Unknown'
+
+        df['branch'] = df['email'].apply(extract_branch)
+        return df
+    except Exception as e:
+        return pd.DataFrame()
 
 # Load environment variables
 load_dotenv()
@@ -426,7 +456,7 @@ conn.close()
 #                 st.error(f"Error: {e}")
 
 # Main Interface Tabs
-tab1, tab2, tab3 = st.tabs(["💬 Chat Assistant", "🔍 Student Explorer", "🏢 Company Explorer"])
+tab1, tab2, tab3, tab4 = st.tabs(["💬 Chat Assistant", "🔍 Student Explorer", "🏢 Company Explorer", "📊 CPI Visualizer"])
 
 # --- TAB 1: CHAT ---
 with tab1:
@@ -651,5 +681,166 @@ with tab3:
 
                 display_events_table(ft_events_df, "🎓 Full-Time")
                 display_events_table(intern_events_df, "💼 Internship")
+
+    conn.close()
+
+# --- TAB 4: CPI VISUALIZER ---
+with tab4:
+    st.header("📊 CPI Data Visualization")
+    cpi_df = load_cpi_data()
+    
+    if cpi_df.empty:
+        st.error("Could not load CPI data. Please ensure 'alot_LM (2).csv' and 'branch_mapping.json' exist.")
+    else:
+        # Local navigation for the tab
+        cpi_page = st.selectbox('Select Visualization Feature', [
+            'Overall Stats', 
+            'Branch-wise Stats', 
+            'CPI Plots', 
+            'CPI Range Filter', 
+            'Top Students per Branch', 
+            'Branch Comparisons',
+            'Distribution Analysis'
+        ])
+        
+        st.markdown("---")
+        
+        if cpi_page == 'Overall Stats':
+            st.subheader('Overall Statistics')
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Students", len(cpi_df))
+            col2.metric("Average CPI", round(cpi_df['cpi'].mean(), 2))
+            col3.metric("Max CPI", cpi_df['cpi'].max())
+            
+            st.write("#### Branch-wise Student Distribution")
+            branch_counts = cpi_df['branch'].value_counts().reset_index()
+            branch_counts.columns = ['Branch', 'Count']
+            st.dataframe(branch_counts, hide_index=True, use_container_width=True)
+
+        elif cpi_page == 'Branch-wise Stats':
+            st.subheader('Branch-wise Statistics')
+            branches = sorted(cpi_df['branch'].unique())
+            selected_branch = st.selectbox('Select Branch', branches)
+            branch_df = cpi_df[cpi_df['branch'] == selected_branch]
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Students", len(branch_df))
+            col2.metric("Avg CPI", round(branch_df['cpi'].mean(), 2))
+            col3.metric("Max CPI", branch_df['cpi'].max())
+            
+            st.dataframe(branch_df[['rollno', 'email', 'cpi']], hide_index=True, use_container_width=True)
+
+        elif cpi_page == 'CPI Plots':
+            st.subheader('CPI Distribution Plots')
+            plot_type = st.radio('Select Plot Type', ['Histogram', 'Boxplot'], horizontal=True)
+            branches = st.multiselect('Select Branches', sorted(cpi_df['branch'].unique()), default=sorted(cpi_df['branch'].unique())[:3])
+            
+            if branches:
+                plot_df = cpi_df[cpi_df['branch'].isin(branches)]
+                fig, ax = plt.subplots(figsize=(10, 6))
+                if plot_type == 'Histogram':
+                    sns.histplot(data=plot_df, x='cpi', hue='branch', multiple='stack', ax=ax, palette='viridis')
+                else:
+                    sns.boxplot(data=plot_df, x='branch', y='cpi', ax=ax, palette='Set2')
+                    plt.xticks(rotation=45)
+                st.pyplot(fig)
+            else:
+                st.warning("Please select at least one branch.")
+
+        elif cpi_page == 'CPI Range Filter':
+            st.subheader('Filter Students by CPI Range')
+            min_val = float(cpi_df['cpi'].min())
+            max_val = float(cpi_df['cpi'].max())
+            range_val = st.slider('Select Range', min_val, max_val, (7.0, 9.0))
+            
+            branches = st.multiselect('Filter by Branches (optional)', sorted(cpi_df['branch'].unique()))
+            filtered = cpi_df[(cpi_df['cpi'] >= range_val[0]) & (cpi_df['cpi'] <= range_val[1])]
+            
+            if branches:
+                filtered = filtered[filtered['branch'].isin(branches)]
+            
+            st.write(f"**Found {len(filtered)} students in this range.**")
+            st.dataframe(filtered[['rollno', 'email', 'branch', 'cpi']], hide_index=True, use_container_width=True)
+
+        elif cpi_page == 'Top Students per Branch':
+            st.subheader('Top Academic Performers')
+            n = st.number_input('Show Top N Students', min_value=1, value=5)
+            selected_branches = st.multiselect('Select Branches', sorted(cpi_df['branch'].unique()), default=sorted(cpi_df['branch'].unique())[:2])
+            
+            for branch in selected_branches:
+                with st.expander(f"Top performers in {branch}"):
+                    top = cpi_df[cpi_df['branch'] == branch].nlargest(int(n), 'cpi')[['rollno', 'email', 'cpi']]
+                    st.dataframe(top, hide_index=True, use_container_width=True)
+
+        elif cpi_page == 'Branch Comparisons':
+            st.subheader('Cross-Branch Analysis')
+            branches = st.multiselect('Select Branches to Compare', sorted(cpi_df['branch'].unique()), default=sorted(cpi_df['branch'].unique())[:3])
+            
+            if len(branches) >= 2:
+                # Include Standard Deviation as requested
+                comp_df = cpi_df[cpi_df['branch'].isin(branches)].groupby('branch')['cpi'].agg(['mean', 'std', 'max', 'min', 'count']).reset_index()
+                comp_df.columns = ['Branch', 'Avg CPI', 'Std Dev', 'Max CPI', 'Min CPI', 'Students']
+                
+                st.write("#### Statistical Comparison")
+                st.dataframe(comp_df.round(2), hide_index=True, use_container_width=True)
+                
+                fig, ax = plt.subplots(figsize=(10, 6))
+                sns.barplot(data=comp_df, x='Branch', y='Avg CPI', ax=ax, palette='coolwarm')
+                ax.set_title("Average CPI Comparison")
+                plt.xticks(rotation=45)
+                st.pyplot(fig)
+            else:
+                st.info('Select at least 2 branches to compare.')
+
+        elif cpi_page == 'Distribution Analysis':
+            st.subheader('CPI Distribution & Skewness Analysis')
+            branches = st.multiselect('Select Branches for Analysis', sorted(cpi_df['branch'].unique()), default=sorted(cpi_df['branch'].unique())[:1])
+            
+            if branches:
+                analysis_df = cpi_df[cpi_df['branch'].isin(branches)]
+                
+                # Distribution Plot: Jittered Scatter + Histogram + KDE
+                fig, (ax_box, ax_hist) = plt.subplots(2, sharex=True, gridspec_kw={"height_ratios": (.15, .85)}, figsize=(10, 7))
+                
+                # Boxplot with jittered scatter on top
+                sns.boxplot(x=analysis_df["cpi"], ax=ax_box, color='lightgray')
+                sns.stripplot(x=analysis_df["cpi"], ax=ax_box, alpha=0.5, color='blue', jitter=True)
+                ax_box.set(xlabel='')
+                
+                # Main distribution plot
+                sns.histplot(data=analysis_df, x="cpi", kde=True, ax=ax_hist, color='skyblue', stat="density")
+                
+                st.pyplot(fig)
+                
+                # Stat Calculations
+                skewness = analysis_df['cpi'].skew()
+                kurtosis = analysis_df['cpi'].kurt()
+                
+                col1, col2 = st.columns(2)
+                col1.metric("Skewness", round(skewness, 4))
+                col2.metric("Kurtosis", round(kurtosis, 4))
+                
+                # Explanation
+                with st.expander("Interpretation of Results"):
+                    st.write("**Skewness:**")
+                    if abs(skewness) < 0.5:
+                        st.write("The distribution is **fairly symmetrical**.")
+                    elif 0.5 <= abs(skewness) < 1:
+                        st.write("The distribution is **moderately skewed**.")
+                    else:
+                        st.write("The distribution is **highly skewed**.")
+                        
+                    st.write("**Distribution Type Estimation:**")
+                    # Simple normality check
+                    if len(analysis_df) >= 8:
+                        stat, p = stats.normaltest(analysis_df['cpi'])
+                        if p > 0.05:
+                            st.success("The distribution appears to be **Gaussian (Normal)** based on D'Agostino's K^2 test (p > 0.05).")
+                        else:
+                            st.warning("The distribution is **not normally distributed** (p < 0.05).")
+                    else:
+                        st.info("Sample size too small for statistical normality testing.")
+            else:
+                st.warning("Please select at least one branch.")
 
     conn.close()

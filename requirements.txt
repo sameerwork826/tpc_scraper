@@ -4,3 +4,6 @@ google-genai
 python-dotenv
 pandas
 tabulate
+matplotlib
+seaborn
+scipy
