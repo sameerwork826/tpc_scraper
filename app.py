@@ -42,7 +42,7 @@ def run_query(query, params=None):
 
 # ... (run_query ends)
 
-def generate_sql(question):
+def generate_sql(question, model_name):
     # Schema Definition for the LLM
     schema = """
     Table: events
@@ -96,13 +96,13 @@ def generate_sql(question):
     # At line 120, 'client' (line 91) IS defined. So this is safe.
     
     response = client.models.generate_content(
-        model='gemini-2.5-flash-lite',
+        model=model_name,
         contents=prompt
     )
     sql = response.text.replace("```sql", "").replace("```", "").strip()
     return sql
 
-def generate_natural_answer(question, sql, df):
+def generate_natural_answer(question, sql, df, model_name):
     # safe-guard for large results
     if len(df) > 50:
         data_context = df.head(50).to_markdown(index=False) + f"\n...(and {len(df)-50} more rows)"
@@ -134,7 +134,7 @@ def generate_natural_answer(question, sql, df):
     """
     
     response = client.models.generate_content(
-        model='gemini-2.5-flash-lite',
+        model=model_name,
         contents=prompt
     )
     return response.text
@@ -174,6 +174,23 @@ with st.sidebar:
             if "messages" in st.session_state:
                 st.session_state.messages = []
             st.rerun()
+
+    st.markdown("---")
+    st.header("🤖 AI Model")
+    available_models = [
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite",
+        "gemma-3-1b-it",
+        "gemma-3-4b-it",
+        "gemma-3-12b-it",
+        "gemma-3-27b-it"
+    ]
+    selected_model = st.selectbox(
+        "Choose AI Brain", 
+        available_models, 
+        index=0, 
+        help="Select the model to power Chat Assistant"
+    )
     
     st.markdown("---")
 
@@ -242,14 +259,14 @@ with tab1:
             
             try:
                 # 1. Generate SQL
-                sql_query = generate_sql(prompt)
+                sql_query = generate_sql(prompt, selected_model)
                 
                 # 2. Execute SQL
                 result = run_query(sql_query)
                 
                 if isinstance(result, pd.DataFrame):
                     # 3. Generate Natural Language Answer
-                    nl_response = generate_natural_answer(prompt, sql_query, result)
+                    nl_response = generate_natural_answer(prompt, sql_query, result, selected_model)
                     message_placeholder.markdown(nl_response)
                     
                     # Save to history
