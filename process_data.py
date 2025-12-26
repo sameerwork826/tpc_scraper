@@ -125,7 +125,7 @@ def get_event_metadata(filename, topic_title):
     
     # 1. Strip common prefixes like [Updated], (UPDATED)
     source_text = re.sub(r'^(\[| \()?UPDATED(\]| \))?\s*', '', source_text, flags=re.IGNORECASE).strip()
-    source_text = re.sub(r'^\d{3}\s+', '', source_text).strip() # Remove 001_ prefixes if they leaked in
+    source_text = re.sub(r'^\d{3}[_\s]+', '', source_text).strip() # Remove 001_ or 220_ prefixes
     
     clean_name_lower = source_text.lower()
     event_type = "Unknown"
@@ -358,24 +358,45 @@ def process_files():
                 branch = s['branch']
                 year = s['year']
                 
-                if not roll:
+                if not roll and not email:
                     continue
                     
                 # Upsert Student
-                if roll not in student_cache:
-                    c.execute("SELECT id, name, email FROM students WHERE roll_no = ?", (roll,))
+                student_id = None
+                
+                # Try to find by roll first
+                if roll:
+                    c.execute("SELECT id, name FROM students WHERE roll_no = ?", (roll,))
                     row = c.fetchone()
                     if row:
-                        student_cache[roll] = row[0]
+                        student_id = row[0]
                         # Update name if previously "Unknown"
                         if row[1] == "Unknown Student" and name != "Unknown Student":
-                             c.execute("UPDATE students SET name = ? WHERE id = ?", (name, row[0]))
+                             c.execute("UPDATE students SET name = ? WHERE id = ?", (name, student_id))
                     else:
-                        c.execute("INSERT INTO students (roll_no, email, name, branch, year) VALUES (?, ?, ?, ?, ?)",
-                                  (roll, email, name, branch, year))
-                        student_cache[roll] = c.lastrowid
+                        # Try to find by email if roll is new but email might exist
+                        if email:
+                            c.execute("SELECT id FROM students WHERE email = ? AND roll_no IS NULL", (email,))
+                            erow = c.fetchone()
+                            if erow:
+                                student_id = erow[0]
+                                c.execute("UPDATE students SET roll_no = ?, name = ? WHERE id = ?", (roll, name, student_id))
                 
-                student_id = student_cache[roll]
+                # Then by email if no roll or not found by roll
+                if not student_id and email:
+                    c.execute("SELECT id, name FROM students WHERE email = ?", (email,))
+                    row = c.fetchone()
+                    if row:
+                        student_id = row[0]
+                        if row[1] == "Unknown Student" and name != "Unknown Student":
+                             c.execute("UPDATE students SET name = ? WHERE id = ?", (name, student_id))
+                    
+                # Finally Insert if still not found
+                if not student_id:
+                    c.execute("INSERT INTO students (roll_no, email, name, branch, year) VALUES (?, ?, ?, ?, ?)",
+                              (roll, email, name, branch, year))
+                    student_id = c.lastrowid
+                    if roll: student_cache[roll] = student_id
                 
                 # Link to Event
                 c.execute("INSERT INTO event_students (student_id, event_id, raw_line) VALUES (?, ?, ?)",
