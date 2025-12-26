@@ -97,12 +97,16 @@ def parse_filename(filename):
     event_type = "Unknown"
     company = clean_name
     
+    is_intern = "intern" in clean_name_lower
+    
     if "offer" in clean_name_lower:
-        event_type = "FT Offers"
+        event_type = "Internship Offers" if is_intern else "FT Offers"
     elif "interview" in clean_name_lower:
-        event_type = "FT Interview Shortlist"
+        event_type = "Internship Interview Shortlist" if is_intern else "FT Interview Shortlist"
     elif "test" in clean_name_lower:
-        event_type = "FT Test Shortlist"
+        event_type = "Internship Test Shortlist" if is_intern else "FT Test Shortlist"
+    elif "gd" in clean_name_lower or "group discussion" in clean_name_lower:
+         event_type = "Internship GD Shortlist" if is_intern else "FT GD Shortlist"
     
     # Specific fix for pre-placement
     if "pre-placement" in clean_name_lower or "ppo" in clean_name_lower:
@@ -110,11 +114,21 @@ def parse_filename(filename):
 
     # Extract Company Name cleaner
     # Remove known suffixes
-    suffixes = ["_FT_Offers", "_FT_Interview_Shortlist", "_FT_Test_Shortlist", "_Offers", " FT Offers", " FT Interview Shortlist"]
+    suffixes = [
+        "_FT_Offers", "_FT_Interview_Shortlist", "_FT_Test_Shortlist", "_Offers", " FT Offers", " FT Interview Shortlist",
+        "_Internship_Offers", "_Internship_Interview_Shortlist", "_Internship_Test_Shortlist", " Internship Offers",
+        "_Internship_Offer", " Internship Offer", "_FT_Offer", " FT Offer"
+    ]
+    # Also generic removal of event type words if suffix didn't catch it
+    # But be careful not to remove part of company name
+    
     for s in suffixes:
         if s in company:
              company = company.replace(s, "")
-    
+        elif s.lower() in company.lower(): # Case insensitive try
+             pattern = re.compile(re.escape(s), re.IGNORECASE)
+             company = pattern.sub("", company)
+
     company = company.replace("_", " ").strip()
     return company, event_type
 

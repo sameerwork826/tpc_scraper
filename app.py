@@ -140,7 +140,7 @@ with st.sidebar:
     # API Key Handling
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
-        st.warning("⚠️ API Key Missing")
+        st.warning("⚠️ Gemini API Key Missing")
         st.caption("AI features (Chat) require a key. Explorer works without it.")
         user_api_key = st.text_input("Enter Gemini API Key", type="password", help="Get it from: https://aistudio.google.com/app/apikey")
         if user_api_key:
@@ -149,8 +149,8 @@ with st.sidebar:
             st.rerun()
     else:
         st.success("✅ API Key Active")
-        if st.toggle("Change API Key"):
-            new_key = st.text_input("New API Key", type="password")
+        if st.toggle("Change Gemini API Key"):
+            new_key = st.text_input("New Gemini API Key", type="password")
             if new_key:
                 os.environ["GOOGLE_API_KEY"] = new_key
                 st.rerun()
@@ -193,7 +193,7 @@ if api_key:
         st.error(f"Failed to initialize Gemini Client: {e}")
 
 # Main Interface Tabs
-tab1, tab2 = st.tabs(["💬 Chat Assistant", "🔍 Student Explorer"])
+tab1, tab2, tab3 = st.tabs(["💬 Chat Assistant", "🔍 Student Explorer", "🏢 Company Explorer"])
 
 # --- TAB 1: CHAT ---
 with tab1:
@@ -333,4 +333,95 @@ with tab2:
             else:
                 st.info("No recorded events for this student.")
     
+    conn.close()
+
+# --- TAB 3: COMPANY EXPLORER ---
+with tab3:
+    st.header("🏢 Company Explorer")
+    conn = get_db_connection()
+
+    # 1. Company Selector
+    companies = pd.read_sql("SELECT DISTINCT company_name FROM events ORDER BY company_name", conn)['company_name'].tolist()
+    if not companies:
+        st.warning("No companies found.")
+    else:
+        selected_company = st.selectbox("Select Company", companies, index=None, placeholder="Choose a company...")
+
+        if selected_company:
+            st.markdown("---")
+            st.subheader(f"Results for: {selected_company}")
+
+            # Fetch relevant events and students
+            # We need to distinguish between FT and Intern
+            
+            # Get IDs of events for this company
+            events_df = pd.read_sql("SELECT id, event_type, topic_url FROM events WHERE company_name = ?", conn, params=[selected_company])
+            
+            if events_df.empty:
+                st.info("No events found for this company.")
+            else:
+                # Helper to display a category
+                def display_category(label, keywords_include, keywords_exclude=[]):
+                    # Filter events matching this category
+                    # keywords_include: list of strings (OR condition)
+                    # keywords_exclude: list of strings (AND NOT condition)
+                    
+                    matched_event_ids = []
+                    for _, event in events_df.iterrows():
+                        etype = event['event_type']
+                        matches_inc = any(k in etype for k in keywords_include)
+                        matches_exc = any(k in etype for k in keywords_exclude)
+                        
+                        if matches_inc and not matches_exc:
+                            matched_event_ids.append(event['id'])
+                    
+                    if not matched_event_ids:
+                        return
+                        
+                    # Query students for these events
+                    placeholders = ','.join(['?'] * len(matched_event_ids))
+                    q = f"""
+                        SELECT DISTINCT s.name, s.roll_no, s.branch, e.event_type, e.topic_url
+                        FROM event_students es
+                        JOIN students s ON es.student_id = s.id
+                        JOIN events e ON es.event_id = e.id
+                        WHERE es.event_id IN ({placeholders})
+                        ORDER BY s.name
+                    """
+                    results = pd.read_sql(q, conn, params=matched_event_ids)
+                    
+                    if not results.empty:
+                        with st.expander(f"{label} ({len(results)})", expanded=False):
+                            # Display as a table or list
+                            # Let's show a clean table
+                            display_df = results[['name', 'roll_no', 'branch', 'event_type']].copy()
+                            display_df.columns = ["Name", "Roll No", "Branch", "Specific Event"]
+                            st.dataframe(display_df, hide_index=True, use_container_width=True)
+                            
+                            # Show Source Links if any
+                            links = results[['event_type', 'topic_url']].drop_duplicates()
+                            valid_links = links[links['topic_url'] != ""]
+                            if not valid_links.empty:
+                                st.caption("Sources:")
+                                for _, l in valid_links.iterrows():
+                                    st.markdown(f"- [{l['event_type']}]({l['topic_url']})")
+
+                # Define Categories based on user request
+                # 1. FT Offers
+                display_category("🎓 Full-Time Offers", ["FT", "Offer"], ["Intern"])
+                
+                # 2. Internship Offers
+                display_category("💼 Internship Offers", ["Intern", "Offer"], [])
+                
+                # 3. FT Interview Shortlists
+                # Must exclude Offers to avoid dupes if logic overlaps, though event_type is usually distinct
+                display_category("📋 FT Interview Shortlists", ["FT", "Interview"], ["Intern", "Offer"])
+                
+                # 4. Internship Interview Shortlists
+                display_category("📋 Internship Interview Shortlists", ["Intern", "Interview"], ["Offer"])
+                
+                # 5. Others (Tests, etc) - Optional, grouped by FT vs Intern
+                display_category("📝 FT Other Shortlists (Tests/GD)", ["FT"], ["Offer", "Interview", "Intern"])
+                display_category("📝 Internship Other Shortlists (Tests/GD)", ["Intern"], ["Offer", "Interview"])
+
     conn.close()
