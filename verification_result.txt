@@ -1,0 +1,22 @@
+--- Checking Company Normalization ---
+                     company_name
+0  Commonwealth Bank of Australia
+
+--- Checking Sub-Topics (Waitlist) ---
+                          event_type
+0               FT Offers - Waitlist
+1               FT Offers - Waitlist
+2               FT Offers - Waitlist
+3               FT Offers - Waitlist
+4               FT Offers - Waitlist
+5  FT Interview Shortlist - Waitlist
+6  FT Interview Shortlist - Waitlist
+7  FT Interview Shortlist - Waitlist
+8  FT Interview Shortlist - Waitlist
+9  FT Interview Shortlist - Waitlist
+
+--- Checking APT Portfolio Title ---
+                                  event_type
+0                          Internship Offers
+1             Internship Interview Shortlist
+2  Internship Interview Shortlist - Waitlist
