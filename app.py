@@ -138,8 +138,10 @@ with st.sidebar:
     st.markdown("---")
     
     # API Key Handling
-    if not os.getenv("GOOGLE_API_KEY"):
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
         st.warning("⚠️ API Key Missing")
+        st.caption("AI features (Chat) require a key. Explorer works without it.")
         user_api_key = st.text_input("Enter Gemini API Key", type="password", help="Get it from: https://aistudio.google.com/app/apikey")
         if user_api_key:
             os.environ["GOOGLE_API_KEY"] = user_api_key
@@ -181,13 +183,14 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"Error: {e}")
 
-# Check API Key before proceeding
-if not os.getenv("GOOGLE_API_KEY"):
-    st.info("Please enter your Google Gemini API Key in the sidebar to continue.")
-    st.stop()
-
 # Initialize Client
-client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+api_key = os.getenv("GOOGLE_API_KEY")
+client = None
+if api_key:
+    try:
+        client = genai.Client(api_key=api_key)
+    except Exception as e:
+        st.error(f"Failed to initialize Gemini Client: {e}")
 
 # Main Interface Tabs
 tab1, tab2 = st.tabs(["💬 Chat Assistant", "🔍 Student Explorer"])
@@ -205,7 +208,15 @@ with tab1:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    if prompt := st.chat_input("Ask a question..."):
+    if not client:
+        st.warning("⚠️ **Gemini API Key is missing!**")
+        st.info("You can still use the **Student Explorer** tab to browse data manually.")
+        st.markdown("To enable AI Chat:")
+        st.markdown("1. Get a key from [Google AI Studio](https://aistudio.google.com/app/apikey).")
+        st.markdown("2. Enter it in the sidebar.")
+    
+    # Only show chat input if client is available
+    elif prompt := st.chat_input("Ask a question..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)

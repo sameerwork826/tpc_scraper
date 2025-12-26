@@ -2,11 +2,15 @@
 
 A complete system to scrape placement data, store it in a structured database, and query it using natural language powered by Google Gemini.
 
+### 🌟 Live Demo: [https://sameer-tpciitbhu-assistant.streamlit.app/](https://sameer-tpciitbhu-assistant.streamlit.app/)
+*(Student Explorer works without an API key!)*
+
 ## 🚀 Features
 
 *   **Automated Scraper**: Logs in to the placement portal and scrapes all forum topics, offers, and shortlists.
 *   **Data Processing**: Robust parsing of names, roll numbers, and companies into a SQLite database.
 *   **AI-Powered Query Bot**: Ask questions like *"Who got placed in database?"* or *"Count offers for CSE"* using a modern Streamlit UI.
+*   **Student Explorer**: Browse student profiles and placement history manually (No API Key required).
 *   **Smart Matching**: Handles partial names and fuzzy queries.
 
 ## 🛠️ Project Structure
@@ -18,6 +22,14 @@ A complete system to scrape placement data, store it in a structured database, a
 
 ## 📦 Installation
 
+### 1. Get a Gemini API Key (Optional but Recommended)
+To use the **AI Chat** feature, you need a free API key:
+1.  Go to [Google AI Studio](https://aistudio.google.com/app/apikey).
+2.  Click **Create API key**.
+3.  Copy the key. You can enter it in the app's sidebar later.
+
+### 2. Installation Steps
+
 1.  **Clone the repository**
 2.  **Install dependencies**
     ```bash
@@ -26,7 +38,7 @@ A complete system to scrape placement data, store it in a structured database, a
 3.  **Setup Environment**
     Create a `.env` file in the root directory:
     ```env
-    GOOGLE_API_KEY="your_gemini_api_key"
+    GOOGLE_API_KEY="your_gemini_api_key_here"  # Optional: Can also be entered in UI
     ```
 
 ## 🏃 Usage
