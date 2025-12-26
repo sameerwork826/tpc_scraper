@@ -1,10 +1,12 @@
 import streamlit as st
 import sqlite3
 import os
+import json
+import uuid
+from datetime import datetime
 from dotenv import load_dotenv
 import pandas as pd
 import requests
-import json
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
 from langchain_ollama import ChatOllama
@@ -16,6 +18,14 @@ load_dotenv()
 # Configure API
 # Database Configuration
 DB_PATH = "data/placement.db"
+
+def load_chat_history():
+    """Returns an empty dict to ensure per-session isolation on Streamlit Cloud."""
+    return {}
+
+def save_chat_history(history):
+    """No-op to avoid global data persistence and protect user privacy."""
+    pass
 
 def is_valid_api_key(key):
     """Check if the provided key looks like a valid Gemini API key."""
@@ -166,10 +176,137 @@ def generate_natural_answer(question, sql, df, model_name, provider, history=Non
 # Streamlit UI
 st.set_page_config(page_title="Placement Query Bot", page_icon="🎓", layout="wide")
 
+# Custom CSS for GPT-like UI
+st.markdown("""
+<style>
+    /* Main Background */
+    .stApp {
+        background-color: #0e1117;
+    }
+    
+    /* Sidebar styling */
+    section[data-testid="stSidebar"] {
+        background-color: #171923 !important;
+        border-right: 1px solid #2d3748;
+    }
+    
+    /* Premium button styling for New Chat */
+    .new-chat-btn {
+        display: flex;
+        align-items: center;
+        justify-content: flex-start;
+        width: 100%;
+        padding: 10px 14px;
+        background-color: transparent;
+        border: 1px solid #4a5568 !important;
+        border-radius: 6px !important;
+        color: #e2e8f0 !important;
+        font-weight: 500;
+        margin-bottom: 20px;
+        transition: all 0.2s ease;
+        text-decoration: none;
+    }
+    .new-chat-btn:hover {
+        background-color: #2d3748 !important;
+        border-color: #718096 !important;
+    }
+    
+    /* History Button styling */
+    .stButton>button {
+        width: 100%;
+        text-align: left;
+        background-color: transparent !important;
+        border: none !important;
+        color: #a0aec0 !important;
+        padding: 8px 12px !important;
+        font-size: 14px !important;
+        border-radius: 6px !important;
+        transition: background-color 0.2s;
+        margin-bottom: 2px !important;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        display: block !important;
+    }
+    
+    .stButton>button:hover {
+        background-color: #2d3748 !important;
+        color: #edf2f7 !important;
+    }
+    
+    .stButton>button:active {
+        background-color: #4a5568 !important;
+    }
+
+    /* Active Chat Highlight (Simulation) */
+    .active-chat {
+        background-color: #2d3748 !important;
+        color: #ffffff !important;
+    }
+
+    /* Hide default streamlit decoration */
+    div[data-testid="stStatusWidget"] {
+        visibility: hidden;
+    }
+    
+    /* Header optimization */
+    .sidebar-header {
+        font-size: 0.8rem;
+        font-weight: 600;
+        color: #718096;
+        margin: 20px 0 10px 0;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 # Sidebar Configuration
 with st.sidebar:
     st.title("🎓 TPC Bot")
-    st.markdown("**Created by: Sameer Wanjari**")
+    
+    # New Chat Button (Top)
+    if st.button("➕ New Chat", use_container_width=True):
+        st.session_state.current_chat_id = str(uuid.uuid4())
+        st.session_state.messages = []
+        st.rerun()
+
+    # --- CHAT HISTORY SECTION ---
+    st.markdown('<div class="sidebar-header">Recent Chats</div>', unsafe_allow_html=True)
+    
+    # Initialize chat history in session state
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = load_chat_history()
+    
+    if "current_chat_id" not in st.session_state:
+        st.session_state.current_chat_id = str(uuid.uuid4())
+
+    # Sort chat history by timestamp (decending)
+    sorted_chats = sorted(
+        st.session_state.chat_history.items(), 
+        key=lambda x: x[1].get("timestamp", ""), 
+        reverse=True
+    )
+
+    if not sorted_chats:
+        st.info("No recent chats yet.")
+    else:
+        for chat_id, chat_data in sorted_chats:
+            first_msg = chat_data.get("messages", [{}])[0].get("content", "Empty Chat")
+            # Truncate title nicely
+            title = (first_msg[:24] + "..") if len(first_msg) > 24 else first_msg
+            
+            # Use key to identify selected chat
+            is_active = st.session_state.current_chat_id == chat_id
+            btn_label = f"💬 {title}"
+            
+            # Note: We can't easily change button style per-button in Streamlit without hacky CSS
+            # But we can use the key to keep it distinct.
+            if st.button(btn_label, key=f"hist_{chat_id}", use_container_width=True):
+                st.session_state.current_chat_id = chat_id
+                st.session_state.messages = chat_data.get("messages", [])
+                st.rerun()
+
     st.markdown("---")
     st.header("🤖 AI Brain")
     
@@ -298,7 +435,11 @@ with tab1:
 
     # Chat History logic
     if "messages" not in st.session_state:
-        st.session_state.messages = []
+        # Try to load existing chat if current_chat_id is in history
+        if "current_chat_id" in st.session_state and st.session_state.current_chat_id in st.session_state.chat_history:
+            st.session_state.messages = st.session_state.chat_history[st.session_state.current_chat_id].get("messages", [])
+        else:
+            st.session_state.messages = []
 
     # Display Chat History
     for message in st.session_state.messages:
@@ -311,49 +452,53 @@ with tab1:
     elif provider == "Groq" and not os.getenv("GROQ_API_KEY"):
         st.warning("⚠️ **Groq API Key is missing!**")
         st.info("Please select 'Groq' and enter it in the sidebar.")
-    elif provider == "Ollama" and not selected_model:
-        st.warning("⚠️ **No Ollama model selected!**")
-        st.info("Please select a model in the sidebar to start chatting.")
-    else:
-        # Chat Input
-        if prompt := st.chat_input("Ask a question..."):
-            # Display user message immediately
-            with st.chat_message("user"):
-                st.markdown(prompt)
-            st.session_state.messages.append({"role": "user", "content": prompt})
+    st.markdown("---")
+    # Chat Input
+    if prompt := st.chat_input("Ask a question..."):
+        # Display user message immediately
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        st.session_state.messages.append({"role": "user", "content": prompt})
 
-            with st.chat_message("assistant"):
-                message_placeholder = st.empty()
-                message_placeholder.markdown("Thinking...")
-                
-                try:
-                    # 1. Generate SQL
-                    sql_query = generate_sql(prompt, selected_model, provider, st.session_state.messages[:-1])
-                    
-                    # 2. Execute SQL
-                    result = run_query(sql_query)
-                    
-                    if isinstance(result, pd.DataFrame):
-                        # 3. Generate Natural Language Answer
-                        nl_response = generate_natural_answer(prompt, sql_query, result, selected_model, provider, st.session_state.messages[:-1])
-                        message_placeholder.markdown(nl_response)
-                        
-                        # Save to history
-                        st.session_state.messages.append({"role": "assistant", "content": nl_response})
-                        
-                        with st.expander("View Technical Details (SQL & Data)"):
-                            st.code(sql_query, language="sql")
-                            st.dataframe(result)
-                    else:
-                        message_placeholder.error(result)
-                        st.session_state.messages.append({"role": "assistant", "content": f"Error: {result}"})
-                        
-                except Exception as e:
-                    message_placeholder.error(f"An error occurred: {e}")
-                    st.session_state.messages.append({"role": "assistant", "content": f"An error occurred: {e}"})
+        with st.chat_message("assistant"):
+            message_placeholder = st.empty()
+            message_placeholder.markdown("Thinking...")
             
-            # Use rerun to ensure the history loop takes over and pins the input box to the bottom
-            st.rerun()
+            try:
+                # 1. Generate SQL
+                sql_query = generate_sql(prompt, selected_model, provider, st.session_state.messages[:-1])
+                
+                # 2. Execute SQL
+                result = run_query(sql_query)
+                
+                if isinstance(result, pd.DataFrame):
+                    # 3. Generate Natural Language Answer
+                    nl_response = generate_natural_answer(prompt, sql_query, result, selected_model, provider, st.session_state.messages[:-1])
+                    message_placeholder.markdown(nl_response)
+                    
+                    # Save to history
+                    st.session_state.messages.append({"role": "assistant", "content": nl_response})
+                    
+                    with st.expander("View Technical Details (SQL & Data)"):
+                        st.code(sql_query, language="sql")
+                        st.dataframe(result)
+                else:
+                    message_placeholder.error(result)
+                    st.session_state.messages.append({"role": "assistant", "content": f"Error: {result}"})
+                    
+            except Exception as e:
+                message_placeholder.error(f"An error occurred: {e}")
+                st.session_state.messages.append({"role": "assistant", "content": f"An error occurred: {e}"})
+            
+            # Save to persistent history after assistant responds
+            st.session_state.chat_history[st.session_state.current_chat_id] = {
+                "timestamp": datetime.now().isoformat(),
+                "messages": st.session_state.messages
+            }
+            save_chat_history(st.session_state.chat_history)
+        
+        # Use rerun to ensure the history loop takes over and pins the input box to the bottom
+        st.rerun()
 
 # --- TAB 2: EXPLORER ---
 with tab2:
