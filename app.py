@@ -386,9 +386,6 @@ with tab3:
                             WHERE es.event_id IN ({placeholders})
                             ORDER BY s.name
                         """
-                        # Get URL for this type (take first one, usually identical for same event type/company combo if merged)
-                        # Actually event_type might differ if we have multiple files with same type? 
-                        # But grouping by event_type is safer.
                         
                         results = pd.read_sql(q, conn, params=matched_ids)
                         
