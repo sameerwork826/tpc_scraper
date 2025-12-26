@@ -1,9 +1,14 @@
 import streamlit as st
 import sqlite3
-from google import genai
 import os
 from dotenv import load_dotenv
 import pandas as pd
+import requests
+import json
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_groq import ChatGroq
+from langchain_ollama import ChatOllama
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 # Load environment variables
 load_dotenv()
@@ -22,6 +27,37 @@ def is_valid_api_key(key):
         return False
     # Gemini keys usually start with AIza and are ~39-40 chars
     return len(key) >= 30 and key.startswith("AIza")
+
+def get_llm(provider, model_name):
+    """Factory to return a LangChain LLM instance."""
+    if provider == "Gemini":
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            return None
+        return ChatGoogleGenerativeAI(model=model_name, google_api_key=api_key)
+    
+    elif provider == "Groq":
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            return None
+        return ChatGroq(model=model_name, groq_api_key=api_key)
+    
+    elif provider == "Ollama":
+        ollama_base_url = st.session_state.get('ollama_url', "http://localhost:11434")
+        return ChatOllama(model=model_name, base_url=ollama_base_url)
+    
+    return None
+
+def format_history(history):
+    """Convert session state messages to LangChain history."""
+    lc_messages = []
+    if history:
+        for msg in history:
+            if msg["role"] == "user":
+                lc_messages.append(HumanMessage(content=msg["content"]))
+            else:
+                lc_messages.append(AIMessage(content=msg["content"]))
+    return lc_messages
 
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
@@ -42,7 +78,7 @@ def run_query(query, params=None):
 
 # ... (run_query ends)
 
-def generate_sql(question, model_name, history=None):
+def generate_sql(question, model_name, provider, history=None):
     # Schema Definition for the LLM
     schema = """
     Table: events
@@ -56,105 +92,76 @@ def generate_sql(question, model_name, history=None):
     Foreign Keys: student_id -> students.id, event_id -> events.id
     """
     
-    context_history = ""
-    if history:
-        # Get last 4 messages for context
-        context_history = "\nRecent Conversation Context:\n"
-        for msg in history[-4:]:
-            context_history += f"{msg['role'].capitalize()}: {msg['content']}\n"
-
-    prompt = f"""
-    You are a SQL Expert. Convert the following natural language question into a SQL query for a SQLite database.
+    prompt_text = f"""
+    You are a SQL Expert for SQLite. Convert the natural language question into a SQL query.
     
-    Database Schema:
     {schema}
-    {context_history}
     
-    CRITICAL RULES:
-    1. Return ONLY the SQL query. No markdown, no explanation.
-    2. **Joins are Usage**: 
-       To find a student's events: `JOIN event_students es ON s.id = es.student_id JOIN events e ON es.event_id = e.id`
-    3. **ROBUST NAME MATCHING (IMPORTANT)**: 
-       - Users might provide only part of a name (e.g., "Sameer Wanjari" for "Sameer Nandesh Wanjari").
-       - NEVER use `name LIKE '%First Last%'`.
-       - ALWAYS split the name into parts and match each part separately using AND.
-       - Example: For "Sameer Wanjari", use: `s.name LIKE '%Sameer%' AND s.name LIKE '%Wanjari%'`.
-    4. Case Insensitive: `LIKE` in SQLite is case-insensitive for ASCII, but ensure logic holds.
-    5. "Placed" = e.event_type contains 'Offer' or 'PPO' or 'Pre-Placement'.
-    6. "Interview Shortlist" = e.event_type contains 'Interview'.
-    7. "Test Shortlist" = e.event_type contains 'Test'.
-    8. **Branches**: 'branch' column in `students` table contains values like 'CSE', 'Physics'.
-    9. **Counts vs Lists**: 
-       - If asked "How many" ONLY, use `COUNT(DISTINCT s.roll_no)`.
-       - If asked "How many" AND "Names/Who/List", use `SELECT DISTINCT s.name, e.company_name...`.
-    10. Select columns: `students.name`, `students.roll_no`, `students.branch`, `events.company_name`, `events.event_type`.
-    11. **NO HALLUCINATIONS**: Do NOT guess names or details. If the user's question references a person or company, use the exact parts they provided in a `LIKE` query.
+    Rules:
+    1. Return ONLY the SQL. No markdown.
+    2. JOIN logic: students -> event_students -> events.
+    3. Multi-part name matching: `s.name LIKE '%Part1%' AND s.name LIKE '%Part2%'`.
+    4. Offer types: 'Offer', 'PPO', 'Pre-Placement'.
+    5. Columns: `s.name, s.roll_no, s.branch, e.company_name, e.event_type`.
     
     Question: {question}
     SQL:
     """
     
-    # Needs client instance - ensure client is initialized before this if using global, 
-    # OR pass client. But client is initialized later in script. 
-    # Better to move client init UP or lazily use os.getenv
+    llm = get_llm(provider, model_name)
+    if not llm:
+        return f"Error: {provider} LLM not initialized."
     
-    # Wait, client is initialized at line 91. 
-    # If I define this function here (line 32), it captures 'client' from global scope?
-    # No, it looks up 'client' when CALLED.
-    # It is called inside the loop at line 120.
-    # At line 120, 'client' (line 91) IS defined. So this is safe.
+    messages = format_history(history)
+    messages.append(HumanMessage(content=prompt_text))
     
-    response = client.models.generate_content(
-        model=model_name,
-        contents=prompt
-    )
-    sql = response.text.replace("```sql", "").replace("```", "").strip()
-    return sql
+    try:
+        response = llm.invoke(messages)
+        sql = response.content.replace("```sql", "").replace("```", "").replace("sql", "").strip()
+        # Basic cleanup if model includes reasoning/text
+        if "SELECT" in sql.upper():
+            start = sql.upper().find("SELECT")
+            sql = sql[start:]
+        return sql
+    except Exception as e:
+        return f"Error generating SQL: {e}"
 
-def generate_natural_answer(question, sql, df, model_name, history=None):
+def generate_natural_answer(question, sql, df, model_name, provider, history=None):
     # safe-guard for large results
     if len(df) > 50:
         data_context = df.head(50).to_markdown(index=False) + f"\n...(and {len(df)-50} more rows)"
     else:
         data_context = df.to_markdown(index=False)
 
-    context_history = ""
-    if history:
-        context_history = "\nRecent Conversation Context:\n"
-        for msg in history[-4:]:
-            context_history += f"{msg['role'].capitalize()}: {msg['content']}\n"
-
-    prompt = f"""
+    prompt_text = f"""
     You are a helpful assistant for the IIT BHU Placement Cell.
     
     User Question: {question}
     Executed SQL: {sql}
     Result Data:
     {data_context}
-    {context_history}
     
     Task: Answer the user's question naturally based ONLY on the result data.
     
-    STRICT ANTI-HALLUCINATION RULES:
-    1. **ONLY Use Result Data**: Do NOT mention any names, companies, branches, or counts that are not explicitly present in the "Result Data" table above. 
-    2. **No Assumptions**: If the result data is empty, say "I couldn't find any records." Do NOT guess.
-    3. **Schema Grounding**: Do NOT mention fields like "CGPA", "Year of Graduation", or "Phone Number" as they are not tracked in this database.
-    
-    SPECIAL FORMAT FOR "ANALYSIS" REQUESTS:
-    If asked for an "analysis" or "overview" of a student/company, focus on:
-    - **Summarize Shortlists**: Count and list the companies/students from the data.
-    - **Highlight Offers**: Clearly state any 'Offers' found.
-    
-    General Rules:
-    - Use bullet points and bold text for key information.
+    Rules:
+    - No Hallucinations: Use only given data.
+    - If empty result, say "I couldn't find any records."
+    - Use bullet points and bold text.
     - Do NOT mention "SQL" or "dataframe".
     """
     
-    response = client.models.generate_content(
-        model=model_name,
-        contents=prompt
-    )
-    return response.text
+    llm = get_llm(provider, model_name)
+    if not llm:
+        return f"Error: {provider} LLM not initialized."
+    
+    messages = format_history(history)
+    messages.append(HumanMessage(content=prompt_text))
+    
+    try:
+        response = llm.invoke(messages)
+        return response.content
+    except Exception as e:
+        return f"Error generating answer: {e}"
 
 # Streamlit UI
 st.set_page_config(page_title="Placement Query Bot", page_icon="🎓", layout="wide")
@@ -164,64 +171,113 @@ with st.sidebar:
     st.title("🎓 TPC Bot")
     st.markdown("**Created by: Sameer Wanjari**")
     st.markdown("---")
+    st.header("🤖 AI Brain")
     
-    # API Key Handling
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if not is_valid_api_key(api_key):
-        st.warning("⚠️ Gemini API Key Missing")
-        st.info("""
-        **How to get a Key:**
-        1. Visit [Google AI Studio](https://aistudio.google.com/app/apikey)
-        2. Sign in with Google
-        3. Click **"Create API key"**
-        4. Copy & paste below 👇
-        """)
-        user_api_key = st.text_input("Enter Gemini API Key", type="password")
-        if user_api_key:
-            if is_valid_api_key(user_api_key):
-                os.environ["GOOGLE_API_KEY"] = user_api_key
+    provider = st.radio("Select Provider", ["Gemini", "Groq", "Ollama"], index=0)
+    
+    selected_model = None
+    if provider == "Gemini":
+        # API Key Handling (Nested inside Gemini block)
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not is_valid_api_key(api_key):
+            st.warning("⚠️ API Key Missing")
+            user_api_key = st.text_input("Enter Gemini API Key", type="password")
+            if user_api_key:
+                if is_valid_api_key(user_api_key):
+                    os.environ["GOOGLE_API_KEY"] = user_api_key
+                    st.success("Key set!")
+                    st.rerun()
+        else:
+            st.success("✅ API Key Active")
+            if st.button("🗑️ Clear Key"):
+                os.environ["GOOGLE_API_KEY"] = ""
+                st.rerun()
+
+        available_models = [
+            "gemini-2.0-flash",
+            "gemini-1.5-flash",
+            "gemini-1.5-pro"
+        ]
+        selected_model = st.selectbox("Choose Gemini Model", available_models)
+        st.info("☁️ Powered by Google AI")
+        
+    elif provider == "Groq":
+        # Groq API Key
+        groq_api_key = os.getenv("GROQ_API_KEY")
+        if not groq_api_key:
+            st.warning("⚠️ Groq API Key Missing")
+            user_groq_key = st.text_input("Enter Groq API Key", type="password")
+            if user_groq_key:
+                os.environ["GROQ_API_KEY"] = user_groq_key
                 st.success("Key set!")
                 st.rerun()
-            else:
-                st.error("Invalid key format. Should start with 'AIza'.")
-    else:
-        st.success("✅ API Key Active")
-        if st.button("🗑️ Clear/Change Key"):
-            os.environ["GOOGLE_API_KEY"] = ""
-            if "messages" in st.session_state:
-                st.session_state.messages = []
-            st.rerun()
+        else:
+            st.success("✅ Groq Key Active")
+            if st.button("🗑️ Clear Groq Key"):
+                os.environ["GROQ_API_KEY"] = ""
+                st.rerun()
+        
+        groq_models = [
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
+            "mixtral-8x7b-32768",
+            "gemma2-9b-it"
+        ]
+        selected_model = st.selectbox("Choose Groq Model", groq_models)
+        st.info("⚡ Powered by Groq (Ultra-fast)")
 
-    st.markdown("---")
-    st.header("🤖 AI Model")
-    available_models = [
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite",
-        "gemma-3-1b-it",
-        "gemma-3-4b-it",
-        "gemma-3-12b-it",
-        "gemma-3-27b-it"
-    ]
-    selected_model = st.selectbox(
-        "Choose AI Brain", 
-        available_models, 
-        index=0, 
-        help="Select the model to power Chat Assistant"
-    )
+    else:
+        # Ollama
+        st.info("🏠 Local LLM via Ollama")
+        ollama_url = st.text_input("Ollama URL", value="http://localhost:11434")
+        st.session_state.ollama_url = ollama_url
+        
+        def get_ollama_models_list():
+            try:
+                response = requests.get(f"{ollama_url}/api/tags", timeout=2)
+                if response.status_code == 200:
+                    return [m['name'] for m in response.json().get('models', [])]
+            except:
+                pass
+            return []
+
+        if st.button("🔄 Refresh Ollama Models"):
+            with st.spinner("Fetching..."):
+                models = get_ollama_models_list()
+                if models:
+                    st.session_state.ollama_models = models
+                    st.success(f"Found {len(models)} models!")
+                else:
+                    st.error("No models found. Is Ollama running?")
+        
+        ollama_models = st.session_state.get('ollama_models', [])
+        if not ollama_models:
+            ollama_models = get_ollama_models_list()
+            st.session_state.ollama_models = ollama_models
+            
+        if ollama_models:
+            selected_model = st.selectbox("Choose Local Model", ollama_models)
+        else:
+            st.warning("No Ollama models detected.")
+            st.markdown("[Install Ollama](https://ollama.com) & run `ollama run llama3.2`")
     
     st.markdown("---")
 
-    # Database Stats
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT COUNT(DISTINCT roll_no) FROM students")
-    total_students = c.fetchone()[0]
-    c.execute("SELECT COUNT(DISTINCT company_name) FROM events")
-    total_companies = c.fetchone()[0]
-    conn.close()
+# Database Stats
+conn = get_db_connection()
+c = conn.cursor()
+c.execute("SELECT COUNT(DISTINCT roll_no) FROM students")
+total_students = c.fetchone()[0]
+c.execute("SELECT COUNT(DISTINCT company_name) FROM events")
+total_companies = c.fetchone()[0]
+conn.close()
 
-    # Data Refresh
+with st.sidebar:
+    st.markdown("---")
     st.header("⚙️ Data")
+    st.write(f"📊 **Students:** {total_students}")
+    st.write(f"🏢 **Companies:** {total_companies}")
+    
     if st.button("🔄 Refresh DB"):
         with st.spinner("Processing..."):
             try:
@@ -231,15 +287,6 @@ with st.sidebar:
                 st.rerun()
             except Exception as e:
                 st.error(f"Error: {e}")
-
-# Initialize Client
-api_key = os.getenv("GOOGLE_API_KEY")
-client = None
-if is_valid_api_key(api_key):
-    try:
-        client = genai.Client(api_key=api_key)
-    except Exception as e:
-        st.error(f"Failed to initialize Gemini Client: {e}")
 
 # Main Interface Tabs
 tab1, tab2, tab3 = st.tabs(["💬 Chat Assistant", "🔍 Student Explorer", "🏢 Company Explorer"])
@@ -258,12 +305,15 @@ with tab1:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    if not client:
+    if provider == "Gemini" and not os.getenv("GOOGLE_API_KEY"):
         st.warning("⚠️ **Gemini API Key is missing!**")
-        st.info("You can still use the **Student Explorer** tab to browse data manually.")
-        st.markdown("To enable AI Chat:")
-        st.markdown("1. Get a key from [Google AI Studio](https://aistudio.google.com/app/apikey).")
-        st.markdown("2. Enter it in the sidebar.")
+        st.info("Please select 'Gemini' and enter it in the sidebar.")
+    elif provider == "Groq" and not os.getenv("GROQ_API_KEY"):
+        st.warning("⚠️ **Groq API Key is missing!**")
+        st.info("Please select 'Groq' and enter it in the sidebar.")
+    elif provider == "Ollama" and not selected_model:
+        st.warning("⚠️ **No Ollama model selected!**")
+        st.info("Please select a model in the sidebar to start chatting.")
     else:
         # Chat Input
         if prompt := st.chat_input("Ask a question..."):
@@ -278,14 +328,14 @@ with tab1:
                 
                 try:
                     # 1. Generate SQL
-                    sql_query = generate_sql(prompt, selected_model, st.session_state.messages[:-1])
+                    sql_query = generate_sql(prompt, selected_model, provider, st.session_state.messages[:-1])
                     
                     # 2. Execute SQL
                     result = run_query(sql_query)
                     
                     if isinstance(result, pd.DataFrame):
                         # 3. Generate Natural Language Answer
-                        nl_response = generate_natural_answer(prompt, sql_query, result, selected_model, st.session_state.messages[:-1])
+                        nl_response = generate_natural_answer(prompt, sql_query, result, selected_model, provider, st.session_state.messages[:-1])
                         message_placeholder.markdown(nl_response)
                         
                         # Save to history
