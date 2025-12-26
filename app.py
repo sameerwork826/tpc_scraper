@@ -409,21 +409,21 @@ c.execute("SELECT COUNT(DISTINCT company_name) FROM events")
 total_companies = c.fetchone()[0]
 conn.close()
 
-with st.sidebar:
-    st.markdown("---")
-    st.header("⚙️ Data")
-    st.write(f"📊 **Students:** {total_students}")
-    st.write(f"🏢 **Companies:** {total_companies}")
+# with st.sidebar:
+#     st.markdown("---")
+#     st.header("⚙️ Data")
+#     st.write(f"📊 **Students:** {total_students}")
+#     st.write(f"🏢 **Companies:** {total_companies}")
     
-    if st.button("🔄 Refresh DB"):
-        with st.spinner("Processing..."):
-            try:
-                import process_data
-                process_data.process_files()
-                st.success("Done! Reloading...")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Error: {e}")
+#     if st.button("🔄 Refresh DB"):
+#         with st.spinner("Processing..."):
+#             try:
+#                 import process_data
+#                 process_data.process_files()
+#                 st.success("Done! Reloading...")
+#                 st.rerun()
+#             except Exception as e:
+#                 st.error(f"Error: {e}")
 
 # Main Interface Tabs
 tab1, tab2, tab3 = st.tabs(["💬 Chat Assistant", "🔍 Student Explorer", "🏢 Company Explorer"])
