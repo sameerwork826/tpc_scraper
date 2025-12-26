@@ -9,13 +9,6 @@ import pandas as pd
 load_dotenv()
 
 # Configure API
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-if not GOOGLE_API_KEY:
-    st.error("GOOGLE_API_KEY not found in .env file")
-    st.stop()
-
-client = genai.Client(api_key=GOOGLE_API_KEY)
-
 # Database Configuration
 DB_PATH = "data/placement.db"
 
@@ -36,41 +29,7 @@ def run_query(query, params=None):
         conn.close()
         return f"Error: {e}"
 
-# Streamlit UI
-st.set_page_config(page_title="Placement Query Bot", page_icon="🎓", layout="wide")
-
-st.title("🎓 IIT BHU Placement Query Bot")
-st.markdown("Ask questions about student placements, offers, and shortlists naturally.")
-
-# Sidebar Stats & Tools
-conn = get_db_connection()
-c = conn.cursor()
-c.execute("SELECT COUNT(*) FROM students")
-total_students = c.fetchone()[0]
-c.execute("SELECT COUNT(DISTINCT company_name) FROM events")
-total_companies = c.fetchone()[0]
-conn.close()
-
-with st.sidebar:
-    st.header("📊 Database Stats")
-    st.metric("Total Records", total_students)
-    st.metric("Companies", total_companies)
-    st.markdown("---")
-    
-    # Data Management
-    st.header("⚙️ Data Management")
-    if st.button("🔄 Refresh Database"):
-        with st.spinner("Processing new files..."):
-            try:
-                # Run the process_data script logic
-                import process_data
-                process_data.process_files()
-                st.success("Database updated successfully! Please reload the page.")
-            except Exception as e:
-                st.error(f"Error updating database: {e}")
-                
-    st.markdown("---")
-    st.write("Using **Gemini 2.5 Flash Lite** for NL2SQL")
+# ... (run_query ends)
 
 def generate_sql(question):
     # Schema Definition for the LLM
@@ -114,6 +73,16 @@ def generate_sql(question):
     Question: {question}
     SQL:
     """
+    
+    # Needs client instance - ensure client is initialized before this if using global, 
+    # OR pass client. But client is initialized later in script. 
+    # Better to move client init UP or lazily use os.getenv
+    
+    # Wait, client is initialized at line 91. 
+    # If I define this function here (line 32), it captures 'client' from global scope?
+    # No, it looks up 'client' when CALLED.
+    # It is called inside the loop at line 120.
+    # At line 120, 'client' (line 91) IS defined. So this is safe.
     
     response = client.models.generate_content(
         model='gemini-2.5-flash-lite',
@@ -159,46 +128,198 @@ def generate_natural_answer(question, sql, df):
     )
     return response.text
 
-# Chat Interface
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+# Streamlit UI
+st.set_page_config(page_title="Placement Query Bot", page_icon="🎓", layout="wide")
 
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+# Sidebar Configuration
+with st.sidebar:
+    st.title("🎓 TPC Bot")
+    st.markdown("**Created by: Sameer Wanjari**")
+    st.markdown("---")
+    
+    # API Key Handling
+    if not os.getenv("GOOGLE_API_KEY"):
+        st.warning("⚠️ API Key Missing")
+        user_api_key = st.text_input("Enter Gemini API Key", type="password", help="Get it from: https://aistudio.google.com/app/apikey")
+        if user_api_key:
+            os.environ["GOOGLE_API_KEY"] = user_api_key
+            st.success("Key set!")
+            st.rerun()
+    else:
+        st.success("✅ API Key Active")
+        if st.toggle("Change API Key"):
+            new_key = st.text_input("New API Key", type="password")
+            if new_key:
+                os.environ["GOOGLE_API_KEY"] = new_key
+                st.rerun()
+    
+    st.markdown("---")
 
-if prompt := st.chat_input("Ask a question (e.g., 'Where was sameer wanjari placed?')"):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+    # Database Stats
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(DISTINCT roll_no) FROM students")
+    total_students = c.fetchone()[0]
+    c.execute("SELECT COUNT(DISTINCT company_name) FROM events")
+    total_companies = c.fetchone()[0]
+    conn.close()
 
-    with st.chat_message("assistant"):
-        message_placeholder = st.empty()
-        message_placeholder.markdown("Thinking...")
+    st.header("📊 Stats")
+    st.metric("Total Students", total_students)
+    st.metric("Total Companies", total_companies)
+    st.markdown("---")
+    
+    # Data Refresh
+    st.header("⚙️ Data")
+    if st.button("🔄 Refresh DB"):
+        with st.spinner("Processing..."):
+            try:
+                import process_data
+                process_data.process_files()
+                st.success("Done! Reloading...")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+# Check API Key before proceeding
+if not os.getenv("GOOGLE_API_KEY"):
+    st.info("Please enter your Google Gemini API Key in the sidebar to continue.")
+    st.stop()
+
+# Initialize Client
+client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+
+# Main Interface Tabs
+tab1, tab2 = st.tabs(["💬 Chat Assistant", "🔍 Student Explorer"])
+
+# --- TAB 1: CHAT ---
+with tab1:
+    st.header("Ask anything about placements")
+    st.markdown("Examples: *'Analysis of Sameer Wanjari'*, *'How many Physics students got offers?'*")
+
+    # Chat History
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    if prompt := st.chat_input("Ask a question..."):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        with st.chat_message("assistant"):
+            message_placeholder = st.empty()
+            message_placeholder.markdown("Thinking...")
+            
+            try:
+                # 1. Generate SQL
+                sql_query = generate_sql(prompt)
+                
+                # 2. Execute SQL
+                result = run_query(sql_query)
+                
+                if isinstance(result, pd.DataFrame):
+                    # 3. Generate Natural Language Answer
+                    nl_response = generate_natural_answer(prompt, sql_query, result)
+                    message_placeholder.markdown(nl_response)
+                    
+                    # Save to history
+                    st.session_state.messages.append({"role": "assistant", "content": nl_response})
+                    
+                    with st.expander("View Technical Details (SQL & Data)"):
+                        st.code(sql_query, language="sql")
+                        st.dataframe(result)
+                else:
+                    message_placeholder.error(result)
+                    st.session_state.messages.append({"role": "assistant", "content": f"Error: {result}"})
+                    
+            except Exception as e:
+                message_placeholder.error(f"An error occurred: {e}")
+                st.session_state.messages.append({"role": "assistant", "content": f"An error occurred: {e}"})
+
+# --- TAB 2: EXPLORER ---
+with tab2:
+    st.header("Student Profile Explorer")
+    
+    conn = get_db_connection()
+    
+    # 1. Filters
+    col1, col2 = st.columns(2)
+    with col1:
+        branches = pd.read_sql("SELECT DISTINCT branch FROM students WHERE branch IS NOT NULL ORDER BY branch", conn)['branch'].tolist()
+        selected_branch = st.selectbox("Filter by Branch", ["All"] + branches)
+    
+    with col2:
+        years = pd.read_sql("SELECT DISTINCT year FROM students WHERE year IS NOT NULL ORDER BY year", conn)['year'].tolist()
+        selected_year = st.selectbox("Filter by Year", ["All"] + years)
+    
+    # 2. Student Selector
+    query = "SELECT DISTINCT name, roll_no FROM students WHERE 1=1"
+    params = []
+    if selected_branch != "All":
+        query += " AND branch = ?"
+        params.append(selected_branch)
+    if selected_year != "All":
+        query += " AND year = ?"
+        params.append(selected_year)
+    
+    query += " ORDER BY name"
+    
+    students_df = pd.read_sql(query, conn, params=params)
+    
+    if students_df.empty:
+        st.warning("No students found with filters.")
+    else:
+        # Create display label "Name (Roll)"
+        student_options = [f"{row['name']} ({row['roll_no']})" for _, row in students_df.iterrows()]
+        selected_student_str = st.selectbox("Select Student", student_options, index=None, placeholder="Type to search...")
         
-        try:
-            # 1. Generate SQL
-            sql_query = generate_sql(prompt)
+        if selected_student_str:
+            # Extract Roll
+            roll_no = selected_student_str.split("(")[-1].strip(")")
             
-            # 2. Execute SQL
-            result = run_query(sql_query)
+            st.markdown("---")
+            st.subheader(f"Profile: {selected_student_str}")
             
-            if isinstance(result, pd.DataFrame):
-                # 3. Generate Natural Language Answer
-                nl_response = generate_natural_answer(prompt, sql_query, result)
-                message_placeholder.markdown(nl_response)
+            # Fetch History
+            history_query = """
+                SELECT e.company_name, e.event_type, e.topic_url
+                FROM event_students es
+                JOIN students s ON es.student_id = s.id
+                JOIN events e ON es.event_id = e.id
+                WHERE s.roll_no = ?
+                ORDER BY e.event_type, e.company_name
+            """
+            history = pd.read_sql(history_query, conn, params=[roll_no])
+            
+            if not history.empty:
+                # Summary Metrics
+                offers = history[history['event_type'].str.contains('Offer', case=False)]
+                interviews = history[history['event_type'].str.contains('Interview', case=False)]
+                tests = history[history['event_type'].str.contains('Test', case=False)]
                 
-                # Save to history
-                st.session_state.messages.append({"role": "assistant", "content": nl_response})
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Offers", len(offers))
+                m2.metric("Interviews", len(interviews))
+                m3.metric("Tests", len(tests))
                 
-                # Optional: Show details
-                with st.expander("View Technical Details (SQL & Data)"):
-                    st.code(sql_query, language="sql")
-                    st.dataframe(result)
+                # Detailed Timeline
+                st.write("#### 📅 Event Timeline")
+                
+                # Group by type for cleaner view
+                for etype in history['event_type'].unique():
+                    with st.expander(f"{etype} ({len(history[history['event_type']==etype])})", expanded=True):
+                        subset = history[history['event_type'] == etype]
+                        for _, row in subset.iterrows():
+                            # Markdown list with link
+                            if row['topic_url']:
+                                st.markdown(f"- [{row['company_name']}]({row['topic_url']})")
+                            else:
+                                st.markdown(f"- {row['company_name']}")
             else:
-                message_placeholder.error(result)
-                st.session_state.messages.append({"role": "assistant", "content": f"Error: {result}"})
-                
-        except Exception as e:
-            message_placeholder.error(f"An error occurred: {e}")
-            st.session_state.messages.append({"role": "assistant", "content": f"An error occurred: {e}"})
+                st.info("No recorded events for this student.")
+    
+    conn.close()
