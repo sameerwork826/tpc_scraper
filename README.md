@@ -22,11 +22,12 @@ A complete system to scrape placement data, store it in a structured database, a
 
 ## 📦 Installation
 
-### 1. Get a Gemini API Key (Optional but Recommended)
-To use the **AI Chat** feature, you need a free API key:
+### 1. Get a Gemini API Key (Required for AI Chat)
+To use the **AI Chat** feature, you need a free API key from Google:
 1.  Go to [Google AI Studio](https://aistudio.google.com/app/apikey).
-2.  Click **Create API key**.
-3.  Copy the key. You can enter it in the app's sidebar later.
+2.  Sign in with your Google account.
+3.  Click **Create API key** (ensure it's for Gemini).
+4.  Copy the key. You can enter it directly in the app's sidebar or set it in your environment.
 
 ### 2. Installation Steps
 

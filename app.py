@@ -12,6 +12,17 @@ load_dotenv()
 # Database Configuration
 DB_PATH = "data/placement.db"
 
+def is_valid_api_key(key):
+    """Check if the provided key looks like a valid Gemini API key."""
+    if not key:
+        return False
+    # Common placeholders and length check
+    placeholders = ["your_gemini_api_key_here", "INSERT_KEY_HERE", "ENTER_KEY"]
+    if any(p in key for p in placeholders):
+        return False
+    # Gemini keys usually start with AIza and are ~39-40 chars
+    return len(key) >= 30 and key.startswith("AIza")
+
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
     return conn
@@ -139,21 +150,30 @@ with st.sidebar:
     
     # API Key Handling
     api_key = os.getenv("GOOGLE_API_KEY")
-    if not api_key:
+    if not is_valid_api_key(api_key):
         st.warning("⚠️ Gemini API Key Missing")
-        st.caption("AI features (Chat) require a key. Explorer works without it.")
-        user_api_key = st.text_input("Enter Gemini API Key", type="password", help="Get it from: https://aistudio.google.com/app/apikey")
+        st.info("""
+        **How to get a Key:**
+        1. Visit [Google AI Studio](https://aistudio.google.com/app/apikey)
+        2. Sign in with Google
+        3. Click **"Create API key"**
+        4. Copy & paste below 👇
+        """)
+        user_api_key = st.text_input("Enter Gemini API Key", type="password")
         if user_api_key:
-            os.environ["GOOGLE_API_KEY"] = user_api_key
-            st.success("Key set!")
-            st.rerun()
+            if is_valid_api_key(user_api_key):
+                os.environ["GOOGLE_API_KEY"] = user_api_key
+                st.success("Key set!")
+                st.rerun()
+            else:
+                st.error("Invalid key format. Should start with 'AIza'.")
     else:
         st.success("✅ API Key Active")
-        if st.toggle("Change Gemini API Key"):
-            new_key = st.text_input("New Gemini API Key", type="password")
-            if new_key:
-                os.environ["GOOGLE_API_KEY"] = new_key
-                st.rerun()
+        if st.button("🗑️ Clear/Change Key"):
+            os.environ["GOOGLE_API_KEY"] = ""
+            if "messages" in st.session_state:
+                st.session_state.messages = []
+            st.rerun()
     
     st.markdown("---")
 
@@ -166,11 +186,6 @@ with st.sidebar:
     total_companies = c.fetchone()[0]
     conn.close()
 
-    st.header("📊 Stats")
-    st.metric("Total Students", total_students)
-    st.metric("Total Companies", total_companies)
-    st.markdown("---")
-    
     # Data Refresh
     st.header("⚙️ Data")
     if st.button("🔄 Refresh DB"):
@@ -186,7 +201,7 @@ with st.sidebar:
 # Initialize Client
 api_key = os.getenv("GOOGLE_API_KEY")
 client = None
-if api_key:
+if is_valid_api_key(api_key):
     try:
         client = genai.Client(api_key=api_key)
     except Exception as e:
