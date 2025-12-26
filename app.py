@@ -42,7 +42,7 @@ def run_query(query, params=None):
 
 # ... (run_query ends)
 
-def generate_sql(question, model_name):
+def generate_sql(question, model_name, history=None):
     # Schema Definition for the LLM
     schema = """
     Table: events
@@ -56,11 +56,19 @@ def generate_sql(question, model_name):
     Foreign Keys: student_id -> students.id, event_id -> events.id
     """
     
+    context_history = ""
+    if history:
+        # Get last 4 messages for context
+        context_history = "\nRecent Conversation Context:\n"
+        for msg in history[-4:]:
+            context_history += f"{msg['role'].capitalize()}: {msg['content']}\n"
+
     prompt = f"""
     You are a SQL Expert. Convert the following natural language question into a SQL query for a SQLite database.
     
     Database Schema:
     {schema}
+    {context_history}
     
     CRITICAL RULES:
     1. Return ONLY the SQL query. No markdown, no explanation.
@@ -80,6 +88,7 @@ def generate_sql(question, model_name):
        - If asked "How many" ONLY, use `COUNT(DISTINCT s.roll_no)`.
        - If asked "How many" AND "Names/Who/List", use `SELECT DISTINCT s.name, e.company_name...`.
     10. Select columns: `students.name`, `students.roll_no`, `students.branch`, `events.company_name`, `events.event_type`.
+    11. **NO HALLUCINATIONS**: Do NOT guess names or details. If the user's question references a person or company, use the exact parts they provided in a `LIKE` query.
     
     Question: {question}
     SQL:
@@ -102,12 +111,18 @@ def generate_sql(question, model_name):
     sql = response.text.replace("```sql", "").replace("```", "").strip()
     return sql
 
-def generate_natural_answer(question, sql, df, model_name):
+def generate_natural_answer(question, sql, df, model_name, history=None):
     # safe-guard for large results
     if len(df) > 50:
         data_context = df.head(50).to_markdown(index=False) + f"\n...(and {len(df)-50} more rows)"
     else:
         data_context = df.to_markdown(index=False)
+
+    context_history = ""
+    if history:
+        context_history = "\nRecent Conversation Context:\n"
+        for msg in history[-4:]:
+            context_history += f"{msg['role'].capitalize()}: {msg['content']}\n"
 
     prompt = f"""
     You are a helpful assistant for the IIT BHU Placement Cell.
@@ -116,21 +131,23 @@ def generate_natural_answer(question, sql, df, model_name):
     Executed SQL: {sql}
     Result Data:
     {data_context}
+    {context_history}
     
     Task: Answer the user's question naturally based ONLY on the result data.
     
+    STRICT ANTI-HALLUCINATION RULES:
+    1. **ONLY Use Result Data**: Do NOT mention any names, companies, branches, or counts that are not explicitly present in the "Result Data" table above. 
+    2. **No Assumptions**: If the result data is empty, say "I couldn't find any records." Do NOT guess.
+    3. **Schema Grounding**: Do NOT mention fields like "CGPA", "Year of Graduation", or "Phone Number" as they are not tracked in this database.
+    
     SPECIAL FORMAT FOR "ANALYSIS" REQUESTS:
-    If the user asks for an "analysis" or "overview" of a student, you MUST follow this format:
-    1. **Interview Shortlist Summary**: "Lastname was shortlisted for X companies for Interviews." (Count unique companies from events where event_type contains 'Interview').
-       - IGNORE 'Test Shortlists' for this count unless explicitly asked.
-    2. **Interview Shortlist Details**: List the companies (e.g., "• Company A \n • Company B").
-    3. **Offers**: Clearly state any 'FT Offers' or 'Internship Offers' received.
+    If asked for an "analysis" or "overview" of a student/company, focus on:
+    - **Summarize Shortlists**: Count and list the companies/students from the data.
+    - **Highlight Offers**: Clearly state any 'Offers' found.
     
     General Rules:
-    - If the result is a specific status, state it clearly.
-    - If the dataframe is empty, say "I couldn't find any records matching that."
-    - Use formatting like bold or bullet points for readability.
-    - Do NOT mention "SQL" or "dataframe" in the final answer.
+    - Use bullet points and bold text for key information.
+    - Do NOT mention "SQL" or "dataframe".
     """
     
     response = client.models.generate_content(
@@ -178,8 +195,8 @@ with st.sidebar:
     st.markdown("---")
     st.header("🤖 AI Model")
     available_models = [
-        "gemini-2.0-flash",
-        "gemini-2.0-flash-lite",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
         "gemma-3-1b-it",
         "gemma-3-4b-it",
         "gemma-3-12b-it",
@@ -232,10 +249,11 @@ with tab1:
     st.header("Ask anything about placements")
     st.markdown("Examples: *'Analysis of Sameer Wanjari'*, *'How many Physics students got offers?'*")
 
-    # Chat History
+    # Chat History logic
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
+    # Display Chat History
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
@@ -246,42 +264,46 @@ with tab1:
         st.markdown("To enable AI Chat:")
         st.markdown("1. Get a key from [Google AI Studio](https://aistudio.google.com/app/apikey).")
         st.markdown("2. Enter it in the sidebar.")
-    
-    # Only show chat input if client is available
-    elif prompt := st.chat_input("Ask a question..."):
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+    else:
+        # Chat Input
+        if prompt := st.chat_input("Ask a question..."):
+            # Display user message immediately
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            st.session_state.messages.append({"role": "user", "content": prompt})
 
-        with st.chat_message("assistant"):
-            message_placeholder = st.empty()
-            message_placeholder.markdown("Thinking...")
+            with st.chat_message("assistant"):
+                message_placeholder = st.empty()
+                message_placeholder.markdown("Thinking...")
+                
+                try:
+                    # 1. Generate SQL
+                    sql_query = generate_sql(prompt, selected_model, st.session_state.messages[:-1])
+                    
+                    # 2. Execute SQL
+                    result = run_query(sql_query)
+                    
+                    if isinstance(result, pd.DataFrame):
+                        # 3. Generate Natural Language Answer
+                        nl_response = generate_natural_answer(prompt, sql_query, result, selected_model, st.session_state.messages[:-1])
+                        message_placeholder.markdown(nl_response)
+                        
+                        # Save to history
+                        st.session_state.messages.append({"role": "assistant", "content": nl_response})
+                        
+                        with st.expander("View Technical Details (SQL & Data)"):
+                            st.code(sql_query, language="sql")
+                            st.dataframe(result)
+                    else:
+                        message_placeholder.error(result)
+                        st.session_state.messages.append({"role": "assistant", "content": f"Error: {result}"})
+                        
+                except Exception as e:
+                    message_placeholder.error(f"An error occurred: {e}")
+                    st.session_state.messages.append({"role": "assistant", "content": f"An error occurred: {e}"})
             
-            try:
-                # 1. Generate SQL
-                sql_query = generate_sql(prompt, selected_model)
-                
-                # 2. Execute SQL
-                result = run_query(sql_query)
-                
-                if isinstance(result, pd.DataFrame):
-                    # 3. Generate Natural Language Answer
-                    nl_response = generate_natural_answer(prompt, sql_query, result, selected_model)
-                    message_placeholder.markdown(nl_response)
-                    
-                    # Save to history
-                    st.session_state.messages.append({"role": "assistant", "content": nl_response})
-                    
-                    with st.expander("View Technical Details (SQL & Data)"):
-                        st.code(sql_query, language="sql")
-                        st.dataframe(result)
-                else:
-                    message_placeholder.error(result)
-                    st.session_state.messages.append({"role": "assistant", "content": f"Error: {result}"})
-                    
-            except Exception as e:
-                message_placeholder.error(f"An error occurred: {e}")
-                st.session_state.messages.append({"role": "assistant", "content": f"An error occurred: {e}"})
+            # Use rerun to ensure the history loop takes over and pins the input box to the bottom
+            st.rerun()
 
 # --- TAB 2: EXPLORER ---
 with tab2:
