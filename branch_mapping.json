@@ -1,0 +1,42 @@
+{
+    "roll_codes": {
+        "01": "Biochemical",
+        "02": "Biomedical",
+        "03": "Ceramic",
+        "04": "Chemical",
+        "05": "Chemistry",
+        "06": "Civil",
+        "07": "Computer Science",
+        "08": "Electrical",
+        "09": "Electronics",
+        "11": "Material Science",
+        "12": "Mathematics & Computing",
+        "13": "Mechanical",
+        "14": "Metallurgy",
+        "15": "Mining",
+        "16": "Pharmaceutical",
+        "17": "Physics",
+        "21": "Architecture",
+        "22": "Decision Science"
+    },
+    "email_codes": {
+        "bce": "Biochemical",
+        "bme": "Biomedical",
+        "cer": "Ceramic",
+        "che": "Chemical",
+        "chy": "Chemistry",
+        "civ": "Civil",
+        "cse": "Computer Science",
+        "eee": "Electrical",
+        "ece": "Electronics",
+        "mst": "Material Science",
+        "mat": "Mathematics & Computing",
+        "mec": "Mechanical",
+        "met": "Metallurgy",
+        "min": "Mining",
+        "phe": "Pharmaceutical",
+        "phy": "Physics",
+        "apd": "Architecture",
+        "dse": "Decision Science"
+    }
+}

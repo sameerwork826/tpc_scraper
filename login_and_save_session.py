@@ -1,6 +1,6 @@
 from playwright.sync_api import sync_playwright
 
-LOGIN_URL = "https://www.placement.iitbhu.ac.in/"  # CHANGE THIS
+LOGIN_URL = "https://www.placement.iitbhu.ac.in/"  
 
 def main():
     with sync_playwright() as p:

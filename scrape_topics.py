@@ -4,7 +4,7 @@ import time
 from urllib.parse import urljoin
 from playwright.sync_api import sync_playwright
 
-BASE_URL = "https://www.placement.iitbhu.ac.in/"   # 🔴 CHANGE DOMAIN ONLY
+BASE_URL = "https://www.placement.iitbhu.ac.in/"   
 FORUM_2025_URL = BASE_URL + "/forum/c/notice-board/2025-26/"
 
 DATA_DIR = "data"
@@ -38,7 +38,8 @@ def scrape():
             page.goto(f"{FORUM_2025_URL}?page={page_no}")
             page.wait_for_load_state("networkidle")
 
-            rows = page.locator("tr.topic-row:not(.sticky)")
+            # Improved selector: ensure we are in tbody to avoid header row
+            rows = page.locator("tbody tr.topic-row:not(.sticky)")
             count = rows.count()
 
             for i in range(count):
@@ -69,7 +70,10 @@ def scrape():
             page.goto(url)
             page.wait_for_load_state("networkidle")
 
-            content = page.locator("td.post-content").inner_text()
+            # Handle multiple posts (replies) in a single topic
+            # using all_inner_texts() avoids strict mode violation
+            posts = page.locator("td.post-content").all_inner_texts()
+            content = "\n\n---SEPARATOR---\n\n".join(posts)
 
             data = {
                 "topic_title": title,
