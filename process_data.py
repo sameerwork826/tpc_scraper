@@ -209,7 +209,7 @@ def extract_students(text, default_event_type):
         roll = roll_match.group(1) if roll_match else None
         email = email_match.group(1) if email_match else None
         
-        if not roll and not email:
+        if not roll:
             continue
             
         # Name extraction attempt
@@ -358,39 +358,24 @@ def process_files():
                 branch = s['branch']
                 year = s['year']
                 
-                if not roll and not email:
+                if not roll:
                     continue
                     
                 # Upsert Student
                 student_id = None
                 
-                # Try to find by roll first
-                if roll:
-                    c.execute("SELECT id, name FROM students WHERE roll_no = ?", (roll,))
-                    row = c.fetchone()
-                    if row:
-                        student_id = row[0]
-                        # Update name if previously "Unknown"
-                        if row[1] == "Unknown Student" and name != "Unknown Student":
-                             c.execute("UPDATE students SET name = ? WHERE id = ?", (name, student_id))
-                    else:
-                        # Try to find by email if roll is new but email might exist
-                        if email:
-                            c.execute("SELECT id FROM students WHERE email = ? AND roll_no IS NULL", (email,))
-                            erow = c.fetchone()
-                            if erow:
-                                student_id = erow[0]
-                                c.execute("UPDATE students SET roll_no = ?, name = ? WHERE id = ?", (roll, name, student_id))
+                # Try to find by roll
+                c.execute("SELECT id, name FROM students WHERE roll_no = ?", (roll,))
+                row = c.fetchone()
+                if row:
+                    student_id = row[0]
+                    # Update name if previously "Unknown"
+                    if row[1] == "Unknown Student" and name != "Unknown Student":
+                         c.execute("UPDATE students SET name = ? WHERE id = ?", (name, student_id))
+                    # Update email if missing
+                    if email:
+                        c.execute("UPDATE students SET email = ? WHERE id = ? AND email IS NULL", (email, student_id))
                 
-                # Then by email if no roll or not found by roll
-                if not student_id and email:
-                    c.execute("SELECT id, name FROM students WHERE email = ?", (email,))
-                    row = c.fetchone()
-                    if row:
-                        student_id = row[0]
-                        if row[1] == "Unknown Student" and name != "Unknown Student":
-                             c.execute("UPDATE students SET name = ? WHERE id = ?", (name, student_id))
-                    
                 # Finally Insert if still not found
                 if not student_id:
                     c.execute("INSERT INTO students (roll_no, email, name, branch, year) VALUES (?, ?, ?, ?, ?)",
