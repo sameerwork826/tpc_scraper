@@ -393,13 +393,12 @@ with tab3:
                         results = pd.read_sql(q, conn, params=matched_ids)
                         
                         if not results.empty:
-                            # Get Source Link
-                            links = events_subset[events_subset['event_type'] == etype]['topic_url'].unique()
-                            link_md = ""
-                            if len(links) > 0 and links[0]:
-                                link_md = f" [[Source]]({links[0]})"
+                            with st.expander(f"{etype} ({len(results)})", expanded=False):
+                                # Show Source Link if available
+                                links = events_subset[events_subset['event_type'] == etype]['topic_url'].unique()
+                                if len(links) > 0 and links[0]:
+                                    st.markdown(f"🔗 **[View Original Forum Post]({links[0]})**")
                                 
-                            with st.expander(f"{etype} ({len(results)}){link_md}", expanded=False):
                                 display_df = results[['name', 'roll_no', 'branch', 'year']].copy()
                                 display_df.columns = ["Name", "Roll No", "Branch", "Year"]
                                 st.dataframe(display_df, hide_index=True, use_container_width=True)
