@@ -125,7 +125,7 @@ def generate_sql(question, model_name, provider, history=None):
     Columns: id (INTEGER), company_name (TEXT), event_type (TEXT), raw_filename (TEXT), topic_url (TEXT)
     
     Table: students
-    Columns: id (INTEGER), roll_no (TEXT), email (TEXT), name (TEXT), branch (TEXT), year (TEXT)
+    Columns: id (INTEGER), roll_no (TEXT), email (TEXT), name (TEXT), branch (TEXT), year (TEXT), cpi (REAL)
     
     Table: event_students
     Columns: id (INTEGER), student_id (INTEGER), event_id (INTEGER), raw_line (TEXT)
@@ -142,7 +142,8 @@ def generate_sql(question, model_name, provider, history=None):
     2. JOIN logic: students -> event_students -> events.
     3. Multi-part name matching: `s.name LIKE '%Part1%' AND s.name LIKE '%Part2%'`.
     4. Offer types: 'Offer', 'PPO', 'Pre-Placement'.
-    5. Columns: `s.name, s.roll_no, s.branch, e.company_name, e.event_type`.
+    5. Columns: `s.name, s.roll_no, s.branch, s.cpi, e.company_name, e.event_type`.
+    6. CPI queries: Use `s.cpi` for CPI-based filtering (e.g., `WHERE s.cpi > 9.0`).
     
     Question: {question}
     SQL:
@@ -456,7 +457,7 @@ conn.close()
 #                 st.error(f"Error: {e}")
 
 # Main Interface Tabs
-tab1, tab2, tab3, tab4 = st.tabs(["💬 Chat Assistant", "🔍 Student Explorer", "🏢 Company Explorer", "📊 CPI Visualizer"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["💬 Chat Assistant", "🔍 Student Explorer", "🏢 Company Explorer", "📊 CPI Visualizer", "📅 Company Calendar"])
 
 # --- TAB 1: CHAT ---
 with tab1:
@@ -574,41 +575,85 @@ with tab2:
             st.markdown("---")
             st.subheader(f"Profile: {selected_student_str}")
             
-            # Fetch History
-            history_query = """
-                SELECT e.company_name, e.event_type, e.topic_url
-                FROM event_students es
-                JOIN students s ON es.student_id = s.id
-                JOIN events e ON es.event_id = e.id
-                WHERE s.roll_no = ?
-                ORDER BY e.event_type, e.company_name
+            # Fetch ALL student data from denormalized table in ONE query
+            summary_query = """
+                SELECT name, roll_no, branch, year, cpi, 
+                       company_name, event_type, topic_url,
+                       ctc_lpa, ctc_inr, inhand_lpa, inhand_inr
+                FROM student_placement_summary
+                WHERE roll_no = ?
+                ORDER BY event_type, company_name
             """
-            history = pd.read_sql(history_query, conn, params=[roll_no])
+            student_data = pd.read_sql(summary_query, conn, params=[roll_no])
             
-            if not history.empty:
+            if not student_data.empty:
+                # Get student info from first row
+                student_info = student_data.iloc[0]
+                
+                # Check for offers and show placement banner
+                offers_df = student_data[student_data['event_type'].str.contains('Offer', case=False)]
+                if not offers_df.empty:
+                    for _, offer in offers_df.iterrows():
+                        company = offer['company_name']
+                        ctc_display = ""
+                        if pd.notna(offer['ctc_lpa']):
+                            ctc_display = f" | 💰 **CTC: {offer['ctc_lpa']:.2f} LPA**"
+                        elif pd.notna(offer['ctc_inr']):
+                            ctc_display = f" | 💰 **CTC: ₹{offer['ctc_inr']:,}**"
+                        st.success(f"🎉 **PLACED at {company}**{ctc_display}")
+                
+                # Display student info as metrics
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    if pd.notna(student_info['branch']):
+                        st.metric("Branch", student_info['branch'])
+                
+                with col2:
+                    if pd.notna(student_info['year']):
+                        st.metric("Year", student_info['year'])
+                
+                with col3:
+                    if pd.notna(student_info['cpi']):
+                        st.metric("CPI", f"{student_info['cpi']:.2f}")
+                
+                # Event Timeline
+                st.write("#### 📅 Event Timeline")
+                
                 # Summary Metrics
-                offers = history[history['event_type'].str.contains('Offer', case=False)]
-                interviews = history[history['event_type'].str.contains('Interview', case=False)]
-                tests = history[history['event_type'].str.contains('Test', case=False)]
+                offers = student_data[student_data['event_type'].str.contains('Offer', case=False)]
+                interviews = student_data[student_data['event_type'].str.contains('Interview', case=False)]
+                tests = student_data[student_data['event_type'].str.contains('Test', case=False)]
                 
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Offers", len(offers))
                 m2.metric("Interviews", len(interviews))
                 m3.metric("Tests", len(tests))
                 
-                # Detailed Timeline
-                st.write("#### 📅 Event Timeline")
-                
-                # Group by type for cleaner view
-                for etype in history['event_type'].unique():
-                    with st.expander(f"{etype} ({len(history[history['event_type']==etype])})", expanded=True):
-                        subset = history[history['event_type'] == etype]
+                # Group by event type
+                for etype in student_data['event_type'].unique():
+                    with st.expander(f"{etype} ({len(student_data[student_data['event_type']==etype])})", expanded=True):
+                        subset = student_data[student_data['event_type'] == etype]
                         for _, row in subset.iterrows():
-                            # Markdown list with link
+                            # Build CTC info if it's an offer
+                            ctc_info = ""
+                            if 'Offer' in row['event_type']:
+                                if pd.notna(row['ctc_lpa']):
+                                    ctc_info = f" | 💰 CTC: {row['ctc_lpa']:.2f} LPA"
+                                    if pd.notna(row['inhand_lpa']):
+                                        ctc_info += f" | In-hand: {row['inhand_lpa']:.2f} LPA"
+                                elif pd.notna(row['ctc_inr']):
+                                    ctc_val = row['ctc_inr'] / 100000
+                                    ctc_info = f" | 💰 CTC: {ctc_val:.2f} LPA"
+                                    if pd.notna(row['inhand_inr']):
+                                        inhand_val = row['inhand_inr'] / 100000
+                                        ctc_info += f" | In-hand: {inhand_val:.2f} LPA"
+                            
+                            # Display with link and CTC
                             if row['topic_url']:
-                                st.markdown(f"- [{row['company_name']}]({row['topic_url']})")
+                                st.markdown(f"- [{row['company_name']}]({row['topic_url']}){ctc_info}")
                             else:
-                                st.markdown(f"- {row['company_name']}")
+                                st.markdown(f"- {row['company_name']}{ctc_info}")
             else:
                 st.info("No recorded events for this student.")
     
@@ -655,13 +700,16 @@ with tab3:
                         # Filter events for this specific type
                         matched_ids = events_subset[events_subset['event_type'] == etype]['id'].tolist()
                         
-                        # Query students
+                        # Query students with CTC info
                         placeholders = ','.join(['?'] * len(matched_ids))
                         q = f"""
-                            SELECT DISTINCT s.name, s.roll_no, s.branch, s.year, e.event_type, e.topic_url
+                            SELECT DISTINCT s.name, s.roll_no, s.branch, s.year, s.cpi, 
+                                   cc.ctc_lpa, cc.ctc_inr, cc.inhand_lpa, cc.inhand_inr,
+                                   e.event_type, e.topic_url
                             FROM event_students es
                             JOIN students s ON es.student_id = s.id
                             JOIN events e ON es.event_id = e.id
+                            LEFT JOIN company_ctc cc ON LOWER(e.company_name) = LOWER(cc.company_name)
                             WHERE es.event_id IN ({placeholders})
                             ORDER BY s.name
                         """
@@ -675,8 +723,30 @@ with tab3:
                                 if len(links) > 0 and links[0]:
                                     st.markdown(f"🔗 **[View Original Forum Post]({links[0]})**")
                                 
-                                display_df = results[['name', 'roll_no', 'branch', 'year']].copy()
-                                display_df.columns = ["Name", "Roll No", "Branch", "Year"]
+                                # Add CTC and In-hand columns
+                                display_df = results[['name', 'roll_no', 'branch', 'year', 'cpi', 'ctc_lpa', 'ctc_inr', 'inhand_lpa', 'inhand_inr']].copy()
+                                
+                                # Format CTC column
+                                display_df['CTC'] = display_df.apply(
+                                    lambda row: f"{row['ctc_lpa']:.2f} LPA" if pd.notna(row['ctc_lpa']) 
+                                    else f"₹{row['ctc_inr']:,}" if pd.notna(row['ctc_inr']) 
+                                    else "N/A", axis=1
+                                )
+                                
+                                # Format In-hand column
+                                display_df['In-hand'] = display_df.apply(
+                                    lambda row: f"{row['inhand_lpa']:.2f} LPA" if pd.notna(row['inhand_lpa']) 
+                                    else f"₹{row['inhand_inr']:,}" if pd.notna(row['inhand_inr']) 
+                                    else "N/A", axis=1
+                                )
+                                
+                                # Format CPI
+                                display_df['CPI'] = display_df['cpi'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
+                                
+                                # Select and rename columns for display
+                                display_df = display_df[['name', 'roll_no', 'branch', 'year', 'CPI', 'CTC', 'In-hand']]
+                                display_df.columns = ["Name", "Roll No", "Branch", "Year", "CPI", "CTC", "In-hand"]
+                                
                                 st.dataframe(display_df, hide_index=True, use_container_width=True)
 
                 display_events_table(ft_events_df, "🎓 Full-Time")
@@ -843,4 +913,116 @@ with tab4:
             else:
                 st.warning("Please select at least one branch.")
 
+    conn.close()
+
+# --- TAB 5: COMPANY CALENDAR ---
+with tab5:
+    st.header("📅 Company Calendar 2025-26")
+    st.markdown("View upcoming company visits with CTC, role, and location details")
+    
+    conn = get_db_connection()
+    
+    # Search bar
+    search_query = st.text_input("🔍 Search Company", placeholder="Type company name...")
+    
+    # Filters
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        min_ctc = st.number_input("Min CTC (LPA)", min_value=0.0, value=0.0, step=0.5)
+    
+    with col2:
+        # Get unique locations
+        locations_df = pd.read_sql("SELECT DISTINCT location FROM company_visits WHERE location IS NOT NULL", conn)
+        all_locations = ["All"] + sorted([loc for loc in locations_df['location'].tolist() if loc])
+        selected_location = st.selectbox("Location", all_locations)
+    
+    with col3:
+        sort_by = st.selectbox("Sort by", ["Company Name", "CTC (High to Low)", "CTC (Low to High)"])
+    
+    # Build query
+    query = "SELECT * FROM company_visits WHERE 1=1"
+    params = []
+    
+    # Add search filter
+    if search_query:
+        query += " AND company_name LIKE ?"
+        params.append(f"%{search_query}%")
+    
+    if min_ctc > 0:
+        query += " AND (ctc_lpa >= ? OR ctc_inr >= ?)"
+        params.extend([min_ctc, min_ctc * 100000])
+    
+    if selected_location != "All":
+        query += " AND location LIKE ?"
+        params.append(f"%{selected_location}%")
+    
+    # Add sorting
+    if sort_by == "Company Name":
+        query += " ORDER BY company_name"
+    elif sort_by == "CTC (High to Low)":
+        query += " ORDER BY COALESCE(ctc_lpa, ctc_inr/100000.0) DESC"
+    else:
+        query += " ORDER BY COALESCE(ctc_lpa, ctc_inr/100000.0) ASC"
+    
+    # Fetch data
+    companies_df = pd.read_sql(query, conn, params=params)
+    
+    st.markdown(f"**Found {len(companies_df)} companies**")
+    
+    if not companies_df.empty:
+        # Display companies
+        for _, company in companies_df.iterrows():
+            with st.expander(f"**{company['company_name']}** - {company['role'] if company['role'] else 'Multiple Roles'}"):
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    if company['ctc_lpa']:
+                        st.metric("CTC", f"{company['ctc_lpa']} LPA")
+                    elif company['ctc_inr']:
+                        st.metric("CTC", f"₹{company['ctc_inr']:,}")
+                    else:
+                        st.metric("CTC", "Refer JD")
+                
+                with col2:
+                    if company['inhand_lpa']:
+                        st.metric("In-hand", f"{company['inhand_lpa']} LPA")
+                    elif company['inhand_inr']:
+                        st.metric("In-hand", f"₹{company['inhand_inr']:,}")
+                    else:
+                        st.metric("In-hand", "Refer JD")
+                
+                with col3:
+                    if company['eligibility_cgpa']:
+                        st.metric("Min CGPA", f"{company['eligibility_cgpa']}")
+                
+                # Role and Location
+                if company['role']:
+                    st.write(f"**Role:** {company['role']}")
+                
+                if company['location']:
+                    st.write(f"**Location:** {company['location']}")
+                
+                if company['eligible_departments']:
+                    st.write(f"**Eligible Departments:** {company['eligible_departments']}")
+                
+                # JD Link
+                if company['jd_link']:
+                    st.markdown(f"📄 [View Job Description]({company['jd_link']})")
+                
+                # Check if students got placed
+                placement_query = """
+                    SELECT COUNT(DISTINCT s.id) as count
+                    FROM events e
+                    JOIN event_students es ON e.id = es.event_id
+                    JOIN students s ON es.student_id = s.id
+                    WHERE LOWER(e.company_name) = LOWER(?)
+                    AND e.event_type LIKE '%Offer%'
+                """
+                placement_df = pd.read_sql(placement_query, conn, params=[company['company_name']])
+                if placement_df['count'].iloc[0] > 0:
+                    st.success(f"✅ {placement_df['count'].iloc[0]} students placed from our database")
+    else:
+        st.info("No companies found matching the filters.")
+    
     conn.close()
