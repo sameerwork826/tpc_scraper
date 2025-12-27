@@ -609,18 +609,28 @@ with tab2:
             st.markdown("---")
             st.subheader(f"Profile: {selected_student_str}")
             
-            # Fetch ALL student data from denormalized table in ONE query
+            # Fetch ALL student data using primary tables and JOINs
             summary_query = """
-                SELECT name, roll_no, branch, year, cpi, 
-                       company_name, event_type, topic_url,
-                       ctc_lpa, ctc_inr, inhand_lpa, inhand_inr
-                FROM student_placement_summary
-                WHERE roll_no = ?
-                ORDER BY event_type, company_name
+                SELECT s.name, s.roll_no, s.branch, s.year, 
+                       e.company_name, e.event_type, e.topic_url,
+                       cc.ctc_lpa, cc.ctc_inr, cc.inhand_lpa, cc.inhand_inr
+                FROM students s
+                LEFT JOIN event_students es ON s.id = es.student_id
+                LEFT JOIN events e ON es.event_id = e.id
+                LEFT JOIN company_ctc cc ON LOWER(e.company_name) = LOWER(cc.company_name)
+                WHERE s.roll_no = ?
+                ORDER BY e.event_type, e.company_name
             """
             student_data = run_query(summary_query, [roll_no])
             
-            if not student_data.empty:
+            if isinstance(student_data, pd.DataFrame) and not student_data.empty:
+                # Merge with CPI data from CSV
+                cpi_data = load_cpi_data()
+                if not cpi_data.empty:
+                    student_data = student_data.merge(cpi_data[['rollno', 'cpi']], left_on='roll_no', right_on='rollno', how='left')
+                else:
+                    student_data['cpi'] = None
+                    
                 # Get student info from first row
                 student_info = student_data.iloc[0]
                 
@@ -734,7 +744,7 @@ with tab3:
                         # Query students with CTC info
                         placeholders = ','.join(['?'] * len(matched_ids))
                         q = f"""
-                            SELECT DISTINCT s.name, s.roll_no, s.branch, s.year, s.cpi, 
+                            SELECT DISTINCT s.name, s.roll_no, s.branch, s.year,
                                    cc.ctc_lpa, cc.ctc_inr, cc.inhand_lpa, cc.inhand_inr,
                                    e.event_type, e.topic_url
                             FROM event_students es
@@ -747,7 +757,16 @@ with tab3:
                         
                         results = run_query(q, matched_ids)
                         
-                        if isinstance(results, pd.DataFrame) and not results.empty:
+                        if isinstance(results, str):
+                            st.error(f"Query Error: {results}")
+                        elif not results.empty:
+                            # Merge with CPI data from CSV
+                            cpi_data = load_cpi_data()
+                            if not cpi_data.empty:
+                                results = results.merge(cpi_data[['rollno', 'cpi']], left_on='roll_no', right_on='rollno', how='left')
+                            else:
+                                results['cpi'] = None
+                                
                             with st.expander(f"{etype} ({len(results)})", expanded=False):
                                 # Show Source Link if available
                                 links = events_subset[events_subset['event_type'] == etype]['topic_url'].unique()
@@ -825,13 +844,24 @@ with tab4:
                 cpi_range = st.slider('Filter by CPI Range (optional)', min_cpi, max_cpi, (min_cpi, max_cpi))
             
             if search_query and len(search_query) >= 2:  # Require at least 2 characters
-                # Search in both name (email) and roll number
+                # Fetch names from students table and merge with cpi_df for searching
+                students_names_df = run_query("SELECT DISTINCT roll_no, name FROM students")
+                
+                search_scope_df = cpi_df.copy()
+                if isinstance(students_names_df, pd.DataFrame) and not students_names_df.empty:
+                    search_scope_df = search_scope_df.merge(students_names_df, left_on='rollno', right_on='roll_no', how='left', suffixes=('_cpi', '_students'))
+                    # Use the name from the students table, if available
+                    search_scope_df['name'] = search_scope_df['name_students'].fillna(search_scope_df['email'].apply(lambda x: x.split('@')[0] if pd.notna(x) else ''))
+                else:
+                    search_scope_df['name'] = search_scope_df['email'].apply(lambda x: x.split('@')[0] if pd.notna(x) else '') # Fallback to email prefix
+                
                 search_lower = search_query.lower().strip()
                 
                 # Filter by search query - more efficient filtering
-                mask = (cpi_df['email'].str.lower().str.contains(search_lower, na=False, regex=False) | 
-                        cpi_df['rollno'].astype(str).str.lower().str.contains(search_lower, na=False, regex=False))
-                filtered_df = cpi_df[mask].copy()
+                mask = (search_scope_df['email'].str.lower().str.contains(search_lower, na=False, regex=False) | 
+                        search_scope_df['rollno'].astype(str).str.lower().str.contains(search_lower, na=False, regex=False) |
+                        search_scope_df['name'].str.lower().str.contains(search_lower, na=False, regex=False))
+                filtered_df = search_scope_df[mask].copy()
                 
                 # Apply branch filter if selected
                 if selected_branches:
@@ -854,8 +884,8 @@ with tab4:
                         st.warning(f"⚠️ Showing top {max_display} results out of {len(filtered_df)}. Use filters to narrow down.")
                     
                     # Show detailed table first (more efficient)
-                    display_df = filtered_df.head(display_limit)[['rollno', 'email', 'branch', 'cpi']].copy()
-                    display_df.columns = ['Roll No', 'Email', 'Branch', 'CPI']
+                    display_df = filtered_df.head(display_limit)[['rollno', 'name', 'email', 'branch', 'cpi']].copy()
+                    display_df.columns = ['Roll No', 'Name', 'Email', 'Branch', 'CPI']
                     st.dataframe(display_df, hide_index=True, use_container_width=True)
                     
                     # Statistics for search results
