@@ -457,7 +457,7 @@ conn.close()
 #                 st.error(f"Error: {e}")
 
 # Main Interface Tabs
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["💬 Chat Assistant", "🔍 Student Explorer", "🏢 Company Explorer", "📊 CPI Visualizer", "📅 Company Calendar"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["💬 Chat Assistant", "🔍 Student Explorer", "🏢 Company Explorer", "📊 CPI Visualizer", "📅 Company Calendar", "📈 Branch Statistics"])
 
 # --- TAB 1: CHAT ---
 with tab1:
@@ -1062,4 +1062,141 @@ with tab5:
     else:
         st.info("No companies found matching the filters.")
     
+    conn.close()
+
+# --- TAB 6: BRANCH STATISTICS ---
+with tab6:
+    st.header("📈 Branch-wise Placement Statistics")
+    
+    conn = get_db_connection()
+    
+    # Options to address warnings
+    pd.set_option('future.no_silent_downcasting', True)
+    
+    # 1. Branch and Year Selection
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        branches = pd.read_sql("SELECT DISTINCT branch FROM students WHERE branch IS NOT NULL ORDER BY branch", conn)['branch'].tolist()
+        selected_branch = st.selectbox("Select Branch", branches, key="branch_stats_select")
+    
+    with col_f2:
+        years = pd.read_sql("SELECT DISTINCT year FROM students WHERE year IS NOT NULL ORDER BY year DESC", conn)['year'].tolist()
+        selected_year = st.selectbox("Select Year", ["All"] + years, key="branch_stats_year")
+    
+    if selected_branch:
+        year_suffix = f" for {selected_year}" if selected_year != "All" else ""
+        st.markdown(f"### Statistics for {selected_branch}{year_suffix}")
+        
+        # 2. Fetch Aggregated Stats
+        # Build filters
+        filters = "s.branch = ?"
+        params = [selected_branch]
+        if selected_year != "All":
+            filters += " AND s.year = ?"
+            params.append(selected_year)
+            
+        # Total Students in Branch/Year
+        total_students = pd.read_sql(f"SELECT COUNT(*) as count FROM students s WHERE {filters}", conn, params=params).iloc[0]['count']
+        
+        # Placement Data (Direct Join)
+        offer_query = f"""
+            SELECT s.id, s.name, e.event_type, e.company_name, 
+                   cc.ctc_lpa, cc.ctc_inr
+            FROM students s
+            JOIN event_students es ON s.id = es.student_id
+            JOIN events e ON es.event_id = e.id
+            LEFT JOIN company_ctc cc ON LOWER(e.company_name) = LOWER(cc.company_name)
+            WHERE {filters} AND (e.event_type LIKE '%Offer%' OR e.event_type LIKE '%PPO%' OR e.event_type LIKE '%Pre-Placement%')
+        """
+        offers_df = pd.read_sql(offer_query, conn, params=params)
+        
+        # Interview Shortlists (Direct Join)
+        shortlist_query = f"""
+            SELECT s.id, e.event_type
+            FROM students s
+            JOIN event_students es ON s.id = es.student_id
+            JOIN events e ON es.event_id = e.id
+            WHERE {filters} AND e.event_type LIKE '%Interview%'
+        """
+        shortlists_df = pd.read_sql(shortlist_query, conn, params=params)
+        
+        # Calculate Metrics
+        placed_students_ids = offers_df['id'].unique()
+        no_placed = len(placed_students_ids)
+        ppo_count = len(offers_df[offers_df['event_type'].str.contains('PPO|Pre-Placement', case=False, na=False)])
+        ft_count = len(offers_df[offers_df['event_type'].str.contains('FT Offer', case=False, na=False)])
+        
+        placement_percentage = (no_placed / total_students * 100) if total_students > 0 else 0
+        
+        # Average Package Calculation
+        offers_df['lpa_equiv'] = offers_df['ctc_lpa'].fillna(offers_df['ctc_inr'] / 100000.0)
+        avg_package = offers_df['lpa_equiv'].mean() if not offers_df['lpa_equiv'].dropna().empty else 0
+        
+        # Display Metrics
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Students", total_students)
+        col2.metric("Placed Students", no_placed)
+        col3.metric("Placement %", f"{placement_percentage:.2f}%")
+        
+        col4, col5, col6 = st.columns(3)
+        col4.metric("PPO Offers", ppo_count)
+        col5.metric("FT Offers", ft_count)
+        col6.metric("Avg Package", f"{avg_package:.2f} LPA" if avg_package > 0 else "N/A")
+        
+        st.markdown("---")
+        st.subheader("Student Details")
+        
+        # 3. Build Detailed Student Table
+        student_details = []
+        
+        # Get students in this branch/year
+        all_students_in_branch = pd.read_sql(f"SELECT id, name FROM students s WHERE {filters} ORDER BY name", conn, params=params)
+        
+        for _, student in all_students_in_branch.iterrows():
+            sid = student['id']
+            sname = student['name']
+            
+            # Shortlists
+            s_shortlists = len(shortlists_df[shortlists_df['id'] == sid])
+            
+            # Offers
+            s_offers = offers_df[offers_df['id'] == sid]
+            
+            offer_types = []
+            offer_companies = []
+            offer_ctcs = []
+            
+            if not s_offers.empty:
+                for _, row in s_offers.iterrows():
+                    etype = row['event_type'].lower()
+                    if 'ppo' in etype or 'pre-placement' in etype:
+                        offer_types.append("PPO")
+                    else:
+                        offer_types.append("FT")
+                    
+                    offer_companies.append(row['company_name'])
+                    
+                    ctc_val = row['ctc_lpa']
+                    if pd.isna(ctc_val) and pd.notna(row['ctc_inr']):
+                        ctc_val = row['ctc_inr'] / 100000.0
+                    
+                    if pd.notna(ctc_val):
+                        offer_ctcs.append(f"{ctc_val:.2f} LPA")
+                    else:
+                        offer_ctcs.append("N/A")
+            
+            student_details.append({
+                "Student Name": sname,
+                "Shortlists": s_shortlists,
+                "Offer Type": ", ".join(list(set(offer_types))) if offer_types else "-",
+                "Offer Company": ", ".join(list(set(offer_companies))) if offer_companies else "-",
+                "Offer CTC": ", ".join(offer_ctcs) if offer_ctcs else "-"
+            })
+            
+        if student_details:
+            details_df = pd.DataFrame(student_details)
+            st.dataframe(details_df, hide_index=True, width='stretch')
+        else:
+            st.info("No student data found for this branch.")
+            
     conn.close()
