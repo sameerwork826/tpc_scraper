@@ -99,24 +99,66 @@ def format_history(history):
                 lc_messages.append(AIMessage(content=msg["content"]))
     return lc_messages
 
-def get_db_connection():
-    conn = sqlite3.connect(DB_PATH)
+@st.cache_resource
+def get_connection():
+    """Cached database connection for better performance."""
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    # Enable WAL mode for better concurrent access
+    conn.execute('PRAGMA journal_mode=WAL')
     return conn
 
+@st.cache_data(ttl=300)  # Cache for 5 minutes
 def run_query(query, params=None):
-    conn = get_db_connection()
+    """Cached query execution for frequently accessed data."""
+    conn = get_connection()
     try:
         if params:
-            df = pd.read_sql_query(query, conn, params=params)
+            # Convert params to tuple for hashability
+            params_tuple = tuple(params) if isinstance(params, list) else params
+            df = pd.read_sql_query(query, conn, params=params_tuple)
         else:
             df = pd.read_sql_query(query, conn)
-        conn.close()
         return df
     except Exception as e:
-        conn.close()
         return f"Error: {e}"
 
 # ... (run_query ends)
+
+# Cached helper functions for frequently accessed data
+@st.cache_data(ttl=600)  # Cache for 10 minutes
+def get_branches():
+    """Get list of all branches."""
+    conn = get_connection()
+    branches = pd.read_sql("SELECT DISTINCT branch FROM students WHERE branch IS NOT NULL ORDER BY branch", conn)['branch'].tolist()
+    return branches
+
+@st.cache_data(ttl=600)
+def get_years():
+    """Get list of all years."""
+    conn = get_connection()
+    years = pd.read_sql("SELECT DISTINCT year FROM students WHERE year IS NOT NULL ORDER BY year", conn)['year'].tolist()
+    return years
+
+@st.cache_data(ttl=600)
+def get_companies():
+    """Get list of all companies."""
+    conn = get_connection()
+    companies = pd.read_sql("SELECT DISTINCT company_name FROM events ORDER BY company_name", conn)['company_name'].tolist()
+    return companies
+
+@st.cache_data(ttl=300)
+def get_students_by_filters(branch=None, year=None):
+    """Get students filtered by branch and/or year."""
+    query = "SELECT DISTINCT name, roll_no FROM students WHERE 1=1"
+    params = []
+    if branch and branch != "All":
+        query += " AND branch = ?"
+        params.append(branch)
+    if year and year != "All":
+        query += " AND year = ?"
+        params.append(year)
+    query += " ORDER BY name"
+    return run_query(query, params if params else None)
 
 def generate_sql(question, model_name, provider, history=None):
     # Schema Definition for the LLM
@@ -431,14 +473,19 @@ with st.sidebar:
     
     st.markdown("---")
 
-# Database Stats
-conn = get_db_connection()
-c = conn.cursor()
-c.execute("SELECT COUNT(DISTINCT roll_no) FROM students")
-total_students = c.fetchone()[0]
-c.execute("SELECT COUNT(DISTINCT company_name) FROM events")
-total_companies = c.fetchone()[0]
-conn.close()
+# Database Stats - Cached
+@st.cache_data(ttl=600)  # Cache for 10 minutes
+def get_db_stats():
+    """Get database statistics with caching."""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(DISTINCT roll_no) FROM students")
+    total_students = c.fetchone()[0]
+    c.execute("SELECT COUNT(DISTINCT company_name) FROM events")
+    total_companies = c.fetchone()[0]
+    return total_students, total_companies
+
+total_students, total_companies = get_db_stats()
 
 # with st.sidebar:
 #     st.markdown("---")
@@ -535,33 +582,20 @@ with tab1:
 with tab2:
     st.header("Student Profile Explorer")
     
-    conn = get_db_connection()
-    
-    # 1. Filters
+    # 1. Filters - Use cached functions
     col1, col2 = st.columns(2)
     with col1:
-        branches = pd.read_sql("SELECT DISTINCT branch FROM students WHERE branch IS NOT NULL ORDER BY branch", conn)['branch'].tolist()
+        branches = get_branches()
         selected_branch = st.selectbox("Filter by Branch", ["All"] + branches)
     
     with col2:
-        years = pd.read_sql("SELECT DISTINCT year FROM students WHERE year IS NOT NULL ORDER BY year", conn)['year'].tolist()
+        years = get_years()
         selected_year = st.selectbox("Filter by Year", ["All"] + years)
     
-    # 2. Student Selector
-    query = "SELECT DISTINCT name, roll_no FROM students WHERE 1=1"
-    params = []
-    if selected_branch != "All":
-        query += " AND branch = ?"
-        params.append(selected_branch)
-    if selected_year != "All":
-        query += " AND year = ?"
-        params.append(selected_year)
+    # 2. Student Selector - Use cached function
+    students_df = get_students_by_filters(selected_branch, selected_year)
     
-    query += " ORDER BY name"
-    
-    students_df = pd.read_sql(query, conn, params=params)
-    
-    if students_df.empty:
+    if isinstance(students_df, str) or students_df.empty:
         st.warning("No students found with filters.")
     else:
         # Create display label "Name (Roll)"
@@ -584,7 +618,7 @@ with tab2:
                 WHERE roll_no = ?
                 ORDER BY event_type, company_name
             """
-            student_data = pd.read_sql(summary_query, conn, params=[roll_no])
+            student_data = run_query(summary_query, [roll_no])
             
             if not student_data.empty:
                 # Get student info from first row
@@ -656,16 +690,13 @@ with tab2:
                                 st.markdown(f"- {row['company_name']}{ctc_info}")
             else:
                 st.info("No recorded events for this student.")
-    
-    conn.close()
 
 # --- TAB 3: COMPANY EXPLORER ---
 with tab3:
     st.header("🏢 Company Explorer")
-    conn = get_db_connection()
 
-    # 1. Company Selector
-    companies = pd.read_sql("SELECT DISTINCT company_name FROM events ORDER BY company_name", conn)['company_name'].tolist()
+    # 1. Company Selector - Use cached function
+    companies = get_companies()
     if not companies:
         st.warning("No companies found.")
     else:
@@ -679,7 +710,7 @@ with tab3:
             # We need to distinguish between FT and Intern
             
             # Get IDs of events for this company
-            events_df = pd.read_sql("SELECT id, event_type, topic_url FROM events WHERE company_name = ?", conn, params=[selected_company])
+            events_df = run_query("SELECT id, event_type, topic_url FROM events WHERE company_name = ?", [selected_company])
             
             if events_df.empty:
                 st.info("No events found for this company.")
@@ -714,9 +745,9 @@ with tab3:
                             ORDER BY s.name
                         """
                         
-                        results = pd.read_sql(q, conn, params=matched_ids)
+                        results = run_query(q, matched_ids)
                         
-                        if not results.empty:
+                        if isinstance(results, pd.DataFrame) and not results.empty:
                             with st.expander(f"{etype} ({len(results)})", expanded=False):
                                 # Show Source Link if available
                                 links = events_subset[events_subset['event_type'] == etype]['topic_url'].unique()
@@ -752,14 +783,13 @@ with tab3:
                 display_events_table(ft_events_df, "🎓 Full-Time")
                 display_events_table(intern_events_df, "💼 Internship")
 
-    conn.close()
 
 # --- TAB 4: CPI VISUALIZER ---
 with tab4:
     st.header("📊 CPI Data Visualization")
     cpi_df = load_cpi_data()
     
-    if cpi_df.empty:
+    if cpi_df is None or (isinstance(cpi_df, pd.DataFrame) and cpi_df.empty):
         st.error("Could not load CPI data. Please ensure 'alot_LM (2).csv' and 'branch_mapping.json' exist.")
     else:
         # Local navigation for the tab
@@ -770,12 +800,91 @@ with tab4:
             'CPI Range Filter', 
             'Top Students per Branch', 
             'Branch Comparisons',
-            'Distribution Analysis'
+            'Distribution Analysis',
+            'Student Search'
         ])
         
         st.markdown("---")
         
-        if cpi_page == 'Overall Stats':
+        if cpi_page == 'Student Search':
+            st.subheader('🔍 Search Students by Name or Roll Number')
+            
+            # Search input
+            search_query = st.text_input('Enter student name or roll number', placeholder='e.g., "sameer" or "21051"')
+            
+            # Branch filter (optional)
+            col1, col2 = st.columns(2)
+            with col1:
+                branches = sorted(cpi_df['branch'].unique())
+                selected_branches = st.multiselect('Filter by Branch (optional)', branches)
+            
+            with col2:
+                # CPI range filter (optional)
+                min_cpi = float(cpi_df['cpi'].min())
+                max_cpi = float(cpi_df['cpi'].max())
+                cpi_range = st.slider('Filter by CPI Range (optional)', min_cpi, max_cpi, (min_cpi, max_cpi))
+            
+            if search_query and len(search_query) >= 2:  # Require at least 2 characters
+                # Search in both name (email) and roll number
+                search_lower = search_query.lower().strip()
+                
+                # Filter by search query - more efficient filtering
+                mask = (cpi_df['email'].str.lower().str.contains(search_lower, na=False, regex=False) | 
+                        cpi_df['rollno'].astype(str).str.lower().str.contains(search_lower, na=False, regex=False))
+                filtered_df = cpi_df[mask].copy()
+                
+                # Apply branch filter if selected
+                if selected_branches:
+                    filtered_df = filtered_df[filtered_df['branch'].isin(selected_branches)]
+                
+                # Apply CPI range filter
+                filtered_df = filtered_df[(filtered_df['cpi'] >= cpi_range[0]) & (filtered_df['cpi'] <= cpi_range[1])]
+                
+                # Sort by CPI descending
+                filtered_df = filtered_df.sort_values('cpi', ascending=False)
+                
+                if not filtered_df.empty:
+                    st.success(f"✅ Found **{len(filtered_df)}** student(s) matching your search")
+                    
+                    # Limit display to prevent performance issues
+                    max_display = 50
+                    display_limit = min(len(filtered_df), max_display)
+                    
+                    if len(filtered_df) > max_display:
+                        st.warning(f"⚠️ Showing top {max_display} results out of {len(filtered_df)}. Use filters to narrow down.")
+                    
+                    # Show detailed table first (more efficient)
+                    display_df = filtered_df.head(display_limit)[['rollno', 'email', 'branch', 'cpi']].copy()
+                    display_df.columns = ['Roll No', 'Email', 'Branch', 'CPI']
+                    st.dataframe(display_df, hide_index=True, use_container_width=True)
+                    
+                    # Statistics for search results
+                    if len(filtered_df) > 1:
+                        st.markdown("### 📈 Statistics for Search Results")
+                        col1, col2, col3, col4 = st.columns(4)
+                        col1.metric("Total Students", len(filtered_df))
+                        col2.metric("Average CPI", f"{filtered_df['cpi'].mean():.2f}")
+                        col3.metric("Highest CPI", f"{filtered_df['cpi'].max():.2f}")
+                        col4.metric("Lowest CPI", f"{filtered_df['cpi'].min():.2f}")
+                else:
+                    st.warning(f"⚠️ No students found matching '{search_query}' with the selected filters")
+                    st.info("💡 Try adjusting your search query or removing some filters")
+            elif search_query and len(search_query) < 2:
+                st.info("👆 Please enter at least 2 characters to search")
+            else:
+                st.info("👆 Enter a student name or roll number to search")
+                
+                # Show some example searches
+                with st.expander("💡 Search Tips"):
+                    st.markdown("""
+                    - **Search by name**: Enter any part of the student's email (e.g., "sameer", "wanjari")
+                    - **Search by roll number**: Enter the full or partial roll number (e.g., "21051234" or "2105")
+                    - **Use filters**: Combine search with branch and CPI filters for more precise results
+                    - **Case insensitive**: Search is not case-sensitive
+                    - **Minimum 2 characters**: Enter at least 2 characters to start searching
+                    """)
+        
+        elif cpi_page == 'Overall Stats':
             st.subheader('Overall Statistics')
             col1, col2, col3 = st.columns(3)
             col1.metric("Total Students", len(cpi_df))
@@ -913,14 +1022,11 @@ with tab4:
             else:
                 st.warning("Please select at least one branch.")
 
-    conn.close()
 
 # --- TAB 5: COMPANY CALENDAR ---
 with tab5:
     st.header("📅 Company Calendar 2025-26")
     st.markdown("View upcoming company visits with CTC, role, and location details")
-    
-    conn = get_db_connection()
     
     # Search bar
     search_query = st.text_input("🔍 Search Company", placeholder="Type company name...")
@@ -932,16 +1038,30 @@ with tab5:
         min_ctc = st.number_input("Min CTC (LPA)", min_value=0.0, value=0.0, step=0.5)
     
     with col2:
-        # Get unique locations
-        locations_df = pd.read_sql("SELECT DISTINCT location FROM company_visits WHERE location IS NOT NULL", conn)
-        all_locations = ["All"] + sorted([loc for loc in locations_df['location'].tolist() if loc])
+        # Optimized location fetching
+        @st.cache_data(ttl=600)
+        def get_visit_locations():
+            conn = get_connection()
+            locations_df = pd.read_sql("SELECT DISTINCT location FROM company_visits WHERE location IS NOT NULL", conn)
+            return sorted([loc for loc in locations_df['location'].tolist() if loc])
+            
+        all_locations = ["All"] + get_visit_locations()
         selected_location = st.selectbox("Location", all_locations)
     
     with col3:
         sort_by = st.selectbox("Sort by", ["Company Name", "CTC (High to Low)", "CTC (Low to High)"])
     
-    # Build query
-    query = "SELECT * FROM company_visits WHERE 1=1"
+    # Optimized query with placement counts
+    query = """
+        SELECT cv.*, 
+               (SELECT COUNT(DISTINCT es.student_id) 
+                FROM events e 
+                JOIN event_students es ON e.id = es.event_id 
+                WHERE LOWER(e.company_name) = LOWER(cv.company_name) 
+                AND e.event_type LIKE '%Offer%') as placement_count
+        FROM company_visits cv 
+        WHERE 1=1
+    """
     params = []
     
     # Add search filter
@@ -954,75 +1074,68 @@ with tab5:
         params.extend([min_ctc, min_ctc * 100000])
     
     if selected_location != "All":
-        query += " AND location LIKE ?"
+        query += " AND cv.location LIKE ?"
         params.append(f"%{selected_location}%")
     
     # Add sorting
     if sort_by == "Company Name":
-        query += " ORDER BY company_name"
+        query += " ORDER BY cv.company_name"
     elif sort_by == "CTC (High to Low)":
-        query += " ORDER BY COALESCE(ctc_lpa, ctc_inr/100000.0) DESC"
+        query += " ORDER BY COALESCE(cv.ctc_lpa, cv.ctc_inr/100000.0) DESC"
     else:
-        query += " ORDER BY COALESCE(ctc_lpa, ctc_inr/100000.0) ASC"
+        query += " ORDER BY COALESCE(cv.ctc_lpa, cv.ctc_inr/100000.0) ASC"
     
-    # Fetch data
-    companies_df = pd.read_sql(query, conn, params=params)
+    # Fetch data using cached run_query
+    companies_df = run_query(query, params if params else None)
     
-    st.markdown(f"**Found {len(companies_df)} companies**")
-    
-    if not companies_df.empty:
-        # Display companies
-        for _, company in companies_df.iterrows():
-            with st.expander(f"**{company['company_name']}** - {company['role'] if company['role'] else 'Multiple Roles'}"):
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    if company['ctc_lpa']:
-                        st.metric("CTC", f"{company['ctc_lpa']} LPA")
-                    elif company['ctc_inr']:
-                        st.metric("CTC", f"₹{company['ctc_inr']:,}")
-                    else:
-                        st.metric("CTC", "Refer JD")
-                
-                with col2:
-                    if company['inhand_lpa']:
-                        st.metric("In-hand", f"{company['inhand_lpa']} LPA")
-                    elif company['inhand_inr']:
-                        st.metric("In-hand", f"₹{company['inhand_inr']:,}")
-                    else:
-                        st.metric("In-hand", "Refer JD")
-                
-                with col3:
-                    if company['eligibility_cgpa']:
-                        st.metric("Min CGPA", f"{company['eligibility_cgpa']}")
-                
-                # Role and Location
-                if company['role']:
-                    st.write(f"**Role:** {company['role']}")
-                
-                if company['location']:
-                    st.write(f"**Location:** {company['location']}")
-                
-                if company['eligible_departments']:
-                    st.write(f"**Eligible Departments:** {company['eligible_departments']}")
-                
-                # JD Link
-                if company['jd_link']:
-                    st.markdown(f"📄 [View Job Description]({company['jd_link']})")
-                
-                # Check if students got placed
-                placement_query = """
-                    SELECT COUNT(DISTINCT s.id) as count
-                    FROM events e
-                    JOIN event_students es ON e.id = es.event_id
-                    JOIN students s ON es.student_id = s.id
-                    WHERE LOWER(e.company_name) = LOWER(?)
-                    AND e.event_type LIKE '%Offer%'
-                """
-                placement_df = pd.read_sql(placement_query, conn, params=[company['company_name']])
-                if placement_df['count'].iloc[0] > 0:
-                    st.success(f"✅ {placement_df['count'].iloc[0]} students placed from our database")
+    if isinstance(companies_df, str):
+        st.error(companies_df)
     else:
-        st.info("No companies found matching the filters.")
+        st.markdown(f"**Found {len(companies_df)} companies**")
+        
+        if not companies_df.empty:
+            # Display companies
+            for _, company in companies_df.iterrows():
+                with st.expander(f"**{company['company_name']}** - {company['role'] if company['role'] else 'Multiple Roles'}"):
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        if company['ctc_lpa']:
+                            st.metric("CTC", f"{company['ctc_lpa']} LPA")
+                        elif company['ctc_inr']:
+                            st.metric("CTC", f"₹{company['ctc_inr']:,}")
+                        else:
+                            st.metric("CTC", "Refer JD")
+                    
+                    with col2:
+                        if company['inhand_lpa']:
+                            st.metric("In-hand", f"{company['inhand_lpa']} LPA")
+                        elif company['inhand_inr']:
+                            st.metric("In-hand", f"₹{company['inhand_inr']:,}")
+                        else:
+                            st.metric("In-hand", "Refer JD")
+                    
+                    with col3:
+                        if company['eligibility_cgpa']:
+                            st.metric("Min CGPA", f"{company['eligibility_cgpa']}")
+                    
+                    # Role and Location
+                    if company['role']:
+                        st.write(f"**Role:** {company['role']}")
+                    
+                    if company['location']:
+                        st.write(f"**Location:** {company['location']}")
+                    
+                    if company['eligible_departments']:
+                        st.write(f"**Eligible Departments:** {company['eligible_departments']}")
+                    
+                    # JD Link
+                    if company['jd_link']:
+                        st.markdown(f"📄 [View Job Description]({company['jd_link']})")
+                    
+                    if company['placement_count'] > 0:
+                        st.success(f"✅ {int(company['placement_count'])} students placed from our database")
+        else:
+            st.info("No companies found matching the filters.")
     
-    conn.close()
+
