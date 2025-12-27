@@ -38,6 +38,12 @@ def load_cpi_data():
             return 'Unknown'
 
         df['branch'] = df['email'].apply(extract_branch)
+        
+        # Filter for 2021 and 2022 only as requested
+        df['year_code'] = df['rollno'].astype(str).str[:2]
+        df['year'] = df['year_code'].apply(lambda x: "20" + x if x.isdigit() and len(x) == 2 else "Unknown")
+        df = df[df['year'].isin(['2021', '2022'])]
+        
         return df
     except Exception as e:
         return pd.DataFrame()
@@ -121,29 +127,40 @@ def run_query(query, params=None):
 def generate_sql(question, model_name, provider, history=None):
     # Schema Definition for the LLM
     schema = """
-    Table: events
-    Columns: id (INTEGER), company_name (TEXT), event_type (TEXT), raw_filename (TEXT), topic_url (TEXT)
-    
     Table: students
     Columns: id (INTEGER), roll_no (TEXT), email (TEXT), name (TEXT), branch (TEXT), year (TEXT), cpi (REAL)
     
+    Table: events
+    Columns: id (INTEGER), company_name (TEXT), event_type (TEXT), topic_url (TEXT)
+    
     Table: event_students
-    Columns: id (INTEGER), student_id (INTEGER), event_id (INTEGER), raw_line (TEXT)
+    Columns: id (INTEGER), student_id (INTEGER), event_id (INTEGER)
     Foreign Keys: student_id -> students.id, event_id -> events.id
+    
+    Table: company_ctc
+    Columns: id (INTEGER), company_name (TEXT), ctc_lpa (REAL), ctc_inr (REAL), inhand_lpa (REAL), inhand_inr (REAL)
+    
+    Table: company_visits
+    Columns: id (INTEGER), company_name (TEXT), role (TEXT), placement_year (TEXT), ctc_lpa (REAL), ctc_inr (REAL), location (TEXT), jd_link (TEXT), eligibility_cgpa (REAL)
     """
     
     prompt_text = f"""
-    You are a SQL Expert for SQLite. Convert the natural language question into a SQL query.
+    You are an expert SQL Generator for a SQLite database containing IIT BHU placement data.
     
     {schema}
     
-    Rules:
-    1. Return ONLY the SQL. No markdown.
-    2. JOIN logic: students -> event_students -> events.
-    3. Multi-part name matching: `s.name LIKE '%Part1%' AND s.name LIKE '%Part2%'`.
-    4. Offer types: 'Offer', 'PPO', 'Pre-Placement'.
-    5. Columns: `s.name, s.roll_no, s.branch, s.cpi, e.company_name, e.event_type`.
-    6. CPI queries: Use `s.cpi` for CPI-based filtering (e.g., `WHERE s.cpi > 9.0`).
+    STRICT RULES:
+    1. Return ONLY the SQL query. No markdown formatting, no explanations.
+    2. YEAR CONSTRAINT: ONLY query data where `students.year` OR `company_visits.placement_year` is IN ('2021', '2022').
+    3. JOIN LOGIC:
+       - To link Students to Companies/Events: `students s JOIN event_students es ON s.id = es.student_id JOIN events e ON es.event_id = e.id`.
+       - To get salary info: `LEFT JOIN company_ctc cc ON LOWER(e.company_name) = LOWER(cc.company_name)`.
+    4. SALARY QUERIES:
+       - Use `COALESCE(cc.ctc_lpa, cc.ctc_inr / 100000.0)` for CTC calculations if querying from `events`.
+       - For `company_visits`, use `ctc_lpa`.
+    5. OFFER TYPES: Filter `e.event_type` using `LIKE '%Offer%'`, `LIKE '%PPO%'`, or `LIKE '%Pre-Placement%'`.
+    6. NAME MATCHING: Use `LIKE '%name%'` for student or company names.
+    7. COLUMN SELECTION: Always include relevant columns like `s.name`, `s.roll_no`, `e.company_name`, `cc.ctc_lpa` where appropriate.
     
     Question: {question}
     SQL:
@@ -175,20 +192,22 @@ def generate_natural_answer(question, sql, df, model_name, provider, history=Non
         data_context = df.to_markdown(index=False)
 
     prompt_text = f"""
-    You are a helpful assistant for the IIT BHU Placement Cell.
+    You are a premium AI Assistant for the IIT BHU Placement Cell. 
+    You have access to detailed placement statistics, student profiles, and company visit records for 2021-2022.
     
     User Question: {question}
-    Executed SQL: {sql}
+    Executed Query: {sql}
     Result Data:
     {data_context}
     
-    Task: Answer the user's question naturally based ONLY on the result data.
+    Task: Provide a detailed, helpful, and naturally phrased answer based ONLY on the result data.
     
     Rules:
-    - No Hallucinations: Use only given data.
-    - If empty result, say "I couldn't find any records."
-    - Use bullet points and bold text.
-    - Do NOT mention "SQL" or "dataframe".
+    - BE COMPREHENSIVE: If the result contains multiple rows, summarize the key findings (e.g., average CTC, top branches, or trends).
+    - PRISTINE FORMATTING: Use Markdown tables (if appropriate), bold text for emphasis, and clear bullet points.
+    - NO HALLUCINATIONS: If the result is empty, politely inform the user that no records were found for the specific query.
+    - TONE: Professional yet friendly, like a helpful placement coordinator.
+    - CONSTRAINTS: Do NOT mention technical terms like "SQL", "dataframe", or "query".
     """
     
     llm = get_llm(provider, model_name)
@@ -434,9 +453,15 @@ with st.sidebar:
 # Database Stats
 conn = get_db_connection()
 c = conn.cursor()
-c.execute("SELECT COUNT(DISTINCT roll_no) FROM students")
+c.execute("SELECT COUNT(DISTINCT roll_no) FROM students WHERE year IN ('2021', '2022')")
 total_students = c.fetchone()[0]
-c.execute("SELECT COUNT(DISTINCT company_name) FROM events")
+c.execute("""
+    SELECT COUNT(DISTINCT company_name) 
+    FROM events e 
+    JOIN event_students es ON e.id = es.event_id 
+    JOIN students s ON es.student_id = s.id 
+    WHERE s.year IN ('2021', '2022')
+""")
 total_companies = c.fetchone()[0]
 conn.close()
 
@@ -579,11 +604,11 @@ with tab2:
         selected_branch = st.selectbox("Filter by Branch", ["All"] + branches)
     
     with col2:
-        years = pd.read_sql("SELECT DISTINCT year FROM students WHERE year IS NOT NULL ORDER BY year", conn)['year'].tolist()
+        years = pd.read_sql("SELECT DISTINCT year FROM students WHERE year IN ('2021', '2022') ORDER BY year", conn)['year'].tolist()
         selected_year = st.selectbox("Filter by Year", ["All"] + years)
     
     # 2. Student Selector
-    query = "SELECT DISTINCT name, roll_no FROM students WHERE 1=1"
+    query = "SELECT DISTINCT name, roll_no FROM students WHERE year IN ('2021', '2022')"
     params = []
     if selected_branch != "All":
         query += " AND branch = ?"
@@ -745,7 +770,7 @@ with tab3:
                             JOIN students s ON es.student_id = s.id
                             JOIN events e ON es.event_id = e.id
                             LEFT JOIN company_ctc cc ON LOWER(e.company_name) = LOWER(cc.company_name)
-                            WHERE es.event_id IN ({placeholders})
+                            WHERE es.event_id IN ({placeholders}) AND s.year IN ('2021', '2022')
                             ORDER BY s.name
                         """
                         
@@ -952,13 +977,13 @@ with tab4:
 
 # --- TAB 5: COMPANY CALENDAR ---
 with tab5:
-    st.header("📅 Company Calendar 2025-26")
-    st.markdown("View upcoming company visits with CTC, role, and location details")
+    st.header("📅 Company Calendar (2021-2022)")
+    st.markdown("View company visits with CTC, role, and location details")
     
     conn = get_db_connection()
     
-    # Company selector (searchable dropdown)
-    companies_list = pd.read_sql("SELECT DISTINCT company_name FROM company_visits WHERE company_name IS NOT NULL ORDER BY company_name", conn)
+    # Company selector (searchable dropdown) - Restrict to 2021/2022
+    companies_list = pd.read_sql("SELECT DISTINCT company_name FROM company_visits WHERE placement_year IN ('2021', '2022', '2021-22', '2022-23') ORDER BY company_name", conn)
     company_options = ["All"] + companies_list['company_name'].dropna().tolist()
     selected_company = st.selectbox("🔍 Select Company", company_options, index=0)
     
@@ -978,11 +1003,11 @@ with tab5:
         sort_by = st.selectbox("Sort by", ["Company Name", "CTC (High to Low)", "CTC (Low to High)"])
     
     # Build query
-    query = "SELECT * FROM company_visits WHERE 1=1"
+    query = "SELECT * FROM company_visits WHERE placement_year IN ('2021', '2022', '2021-22', '2022-23')"
     params = []
     
     # Add company filter from selectbox
-    if selected_company and selected_company != "All":
+    if selected_company != "All":
         query += " AND LOWER(company_name) = LOWER(?)"
         params.append(selected_company)
     
@@ -1080,20 +1105,20 @@ with tab6:
         selected_branch = st.selectbox("Select Branch", branches, key="branch_stats_select")
     
     with col_f2:
-        years = pd.read_sql("SELECT DISTINCT year FROM students WHERE year IS NOT NULL ORDER BY year DESC", conn)['year'].tolist()
+        years = pd.read_sql("SELECT DISTINCT year FROM students WHERE year IN ('2021', '2022') ORDER BY year DESC", conn)['year'].tolist()
         selected_year = st.selectbox("Select Year", ["All"] + years, key="branch_stats_year")
     
     if selected_branch:
-        year_suffix = f" for {selected_year}" if selected_year != "All" else ""
+        year_suffix = f" for {selected_year}" if selected_year != "All" else " (2021-2022)"
         st.markdown(f"### Statistics for {selected_branch}{year_suffix}")
         
         # 2. Fetch Aggregated Stats
-        # Build filters
-        filters = "s.branch = ?"
+        # Build filters - Always restrict to 2021/2022
+        filters = "s.branch = ? AND s.year IN ('2021', '2022')"
         params = [selected_branch]
         if selected_year != "All":
-            filters += " AND s.year = ?"
-            params.append(selected_year)
+            filters = "s.branch = ? AND s.year = ?"
+            params = [selected_branch, selected_year]
             
         # Total Students in Branch/Year
         total_students = pd.read_sql(f"SELECT COUNT(*) as count FROM students s WHERE {filters}", conn, params=params).iloc[0]['count']
@@ -1121,16 +1146,23 @@ with tab6:
         shortlists_df = pd.read_sql(shortlist_query, conn, params=params)
         
         # Calculate Metrics
+        offers_df['lpa_equiv'] = offers_df['ctc_lpa'].fillna(offers_df['ctc_inr'] / 100000.0)
+        
         placed_students_ids = offers_df['id'].unique()
         no_placed = len(placed_students_ids)
-        ppo_count = len(offers_df[offers_df['event_type'].str.contains('PPO|Pre-Placement', case=False, na=False)])
-        ft_count = len(offers_df[offers_df['event_type'].str.contains('FT Offer', case=False, na=False)])
+        
+        # Count unique students for PPO and FT
+        ppo_students = offers_df[offers_df['event_type'].str.contains('PPO|Pre-Placement', case=False, na=False)]['id'].unique()
+        ppo_count = len(ppo_students)
+        
+        ft_students = offers_df[offers_df['event_type'].str.contains('FT Offer', case=False, na=False)]['id'].unique()
+        ft_count = len(ft_students)
         
         placement_percentage = (no_placed / total_students * 100) if total_students > 0 else 0
         
-        # Average Package Calculation
-        offers_df['lpa_equiv'] = offers_df['ctc_lpa'].fillna(offers_df['ctc_inr'] / 100000.0)
-        avg_package = offers_df['lpa_equiv'].mean() if not offers_df['lpa_equiv'].dropna().empty else 0
+        # Average Package Calculation: One (highest) offer per student
+        best_offers_per_student = offers_df.sort_values('lpa_equiv', ascending=False).drop_duplicates('id')
+        avg_package = best_offers_per_student['lpa_equiv'].mean() if not best_offers_per_student['lpa_equiv'].dropna().empty else 0
         
         # Display Metrics
         col1, col2, col3 = st.columns(3)
@@ -1150,11 +1182,12 @@ with tab6:
         student_details = []
         
         # Get students in this branch/year
-        all_students_in_branch = pd.read_sql(f"SELECT id, name FROM students s WHERE {filters} ORDER BY name", conn, params=params)
+        all_students_in_branch = pd.read_sql(f"SELECT id, name, cpi FROM students s WHERE {filters} ORDER BY name", conn, params=params)
         
         for _, student in all_students_in_branch.iterrows():
             sid = student['id']
             sname = student['name']
+            scpi = student['cpi']
             
             # Shortlists
             s_shortlists = len(shortlists_df[shortlists_df['id'] == sid])
@@ -1187,6 +1220,7 @@ with tab6:
             
             student_details.append({
                 "Student Name": sname,
+                "CPI": scpi if pd.notna(scpi) else "-",
                 "Shortlists": s_shortlists,
                 "Offer Type": ", ".join(list(set(offer_types))) if offer_types else "-",
                 "Offer Company": ", ".join(list(set(offer_companies))) if offer_companies else "-",
