@@ -297,7 +297,7 @@ with st.sidebar:
     st.title("🎓 TPC Bot")
     
     # New Chat Button (Top)
-    if st.button("➕ New Chat", use_container_width=True):
+    if st.button("➕ New Chat", width='stretch'):
         st.session_state.current_chat_id = str(uuid.uuid4())
         st.session_state.messages = []
         st.rerun()
@@ -333,7 +333,7 @@ with st.sidebar:
             
             # Note: We can't easily change button style per-button in Streamlit without hacky CSS
             # But we can use the key to keep it distinct.
-            if st.button(btn_label, key=f"hist_{chat_id}", use_container_width=True):
+            if st.button(btn_label, key=f"hist_{chat_id}", width='stretch'):
                 st.session_state.current_chat_id = chat_id
                 st.session_state.messages = chat_data.get("messages", [])
                 st.rerun()
@@ -489,45 +489,80 @@ with tab1:
         # Display user message immediately
         with st.chat_message("user"):
             st.markdown(prompt)
+        if "messages" not in st.session_state:
+            st.session_state.messages = []
         st.session_state.messages.append({"role": "user", "content": prompt})
 
         with st.chat_message("assistant"):
             message_placeholder = st.empty()
             message_placeholder.markdown("Thinking...")
-            
-            try:
-                # 1. Generate SQL
-                sql_query = generate_sql(prompt, selected_model, provider, st.session_state.messages[:-1])
-                
-                # 2. Execute SQL
-                result = run_query(sql_query)
-                
-                if isinstance(result, pd.DataFrame):
-                    # 3. Generate Natural Language Answer
-                    nl_response = generate_natural_answer(prompt, sql_query, result, selected_model, provider, st.session_state.messages[:-1])
-                    message_placeholder.markdown(nl_response)
-                    
-                    # Save to history
-                    st.session_state.messages.append({"role": "assistant", "content": nl_response})
-                    
-                    with st.expander("View Technical Details (SQL & Data)"):
-                        st.code(sql_query, language="sql")
-                        st.dataframe(result)
-                else:
-                    message_placeholder.error(result)
-                    st.session_state.messages.append({"role": "assistant", "content": f"Error: {result}"})
-                    
-            except Exception as e:
-                message_placeholder.error(f"An error occurred: {e}")
-                st.session_state.messages.append({"role": "assistant", "content": f"An error occurred: {e}"})
-            
+
+            # Basic provider/model validation
+            if provider == "Gemini" and not os.getenv("GOOGLE_API_KEY"):
+                err = "Gemini API key is missing. Please set it in the sidebar."
+                message_placeholder.error(err)
+                st.session_state.messages.append({"role": "assistant", "content": err})
+            elif provider == "Groq" and not os.getenv("GROQ_API_KEY"):
+                err = "Groq API key is missing. Please set it in the sidebar."
+                message_placeholder.error(err)
+                st.session_state.messages.append({"role": "assistant", "content": err})
+            elif not selected_model:
+                err = "No model selected. Choose a model in the sidebar."
+                message_placeholder.error(err)
+                st.session_state.messages.append({"role": "assistant", "content": err})
+            else:
+                try:
+                    # 1. Generate SQL (LLM may return an error string)
+                    sql_query = generate_sql(prompt, selected_model, provider, st.session_state.messages[:-1])
+
+                    # If generate_sql returned an error string, show it
+                    if isinstance(sql_query, str) and sql_query.startswith("Error"):
+                        message_placeholder.error(sql_query)
+                        st.session_state.messages.append({"role": "assistant", "content": sql_query})
+                    else:
+                        # Ensure we have a SELECT query (very basic check)
+                        if not isinstance(sql_query, str) or "SELECT" not in sql_query.upper():
+                            # LLM didn't return a SQL query — show feedback
+                            fallback = "I couldn't generate a SQL query from that prompt. Try a more specific question or check the model settings."
+                            message_placeholder.info(fallback)
+                            st.session_state.messages.append({"role": "assistant", "content": fallback})
+                        else:
+                            # 2. Execute SQL
+                            result = run_query(sql_query)
+
+                            # If run_query returned an error string, display it
+                            if isinstance(result, str) and result.startswith("Error"):
+                                message_placeholder.error(result)
+                                st.session_state.messages.append({"role": "assistant", "content": result})
+                            elif isinstance(result, pd.DataFrame):
+                                if result.empty:
+                                    nores = "I couldn't find any records."
+                                    message_placeholder.markdown(nores)
+                                    st.session_state.messages.append({"role": "assistant", "content": nores})
+                                else:
+                                    # 3. Generate Natural Language Answer
+                                    nl_response = generate_natural_answer(prompt, sql_query, result, selected_model, provider, st.session_state.messages[:-1])
+                                    if isinstance(nl_response, str) and nl_response.startswith("Error"):
+                                        message_placeholder.error(nl_response)
+                                        st.session_state.messages.append({"role": "assistant", "content": nl_response})
+                                    else:
+                                        message_placeholder.markdown(nl_response)
+                                        st.session_state.messages.append({"role": "assistant", "content": nl_response})
+                                        with st.expander("View Technical Details (SQL & Data)"):
+                                            st.code(sql_query, language="sql")
+                                            st.dataframe(result, width='stretch')
+                except Exception as e:
+                    err = f"An unexpected error occurred: {e}"
+                    message_placeholder.error(err)
+                    st.session_state.messages.append({"role": "assistant", "content": err})
+
             # Save to persistent history after assistant responds
             st.session_state.chat_history[st.session_state.current_chat_id] = {
                 "timestamp": datetime.now().isoformat(),
                 "messages": st.session_state.messages
             }
             save_chat_history(st.session_state.chat_history)
-        
+
         # Use rerun to ensure the history loop takes over and pins the input box to the bottom
         st.rerun()
 
@@ -747,7 +782,7 @@ with tab3:
                                 display_df = display_df[['name', 'roll_no', 'branch', 'year', 'CPI', 'CTC', 'In-hand']]
                                 display_df.columns = ["Name", "Roll No", "Branch", "Year", "CPI", "CTC", "In-hand"]
                                 
-                                st.dataframe(display_df, hide_index=True, use_container_width=True)
+                                st.dataframe(display_df, hide_index=True, width='stretch')
 
                 display_events_table(ft_events_df, "🎓 Full-Time")
                 display_events_table(intern_events_df, "💼 Internship")
@@ -785,7 +820,7 @@ with tab4:
             st.write("#### Branch-wise Student Distribution")
             branch_counts = cpi_df['branch'].value_counts().reset_index()
             branch_counts.columns = ['Branch', 'Count']
-            st.dataframe(branch_counts, hide_index=True, use_container_width=True)
+            st.dataframe(branch_counts, hide_index=True, width='stretch')
 
         elif cpi_page == 'Branch-wise Stats':
             st.subheader('Branch-wise Statistics')
@@ -798,7 +833,7 @@ with tab4:
             col2.metric("Avg CPI", round(branch_df['cpi'].mean(), 2))
             col3.metric("Max CPI", branch_df['cpi'].max())
             
-            st.dataframe(branch_df[['rollno', 'email', 'cpi']], hide_index=True, use_container_width=True)
+            st.dataframe(branch_df[['rollno', 'email', 'cpi']], hide_index=True, width='stretch')
 
         elif cpi_page == 'CPI Plots':
             st.subheader('CPI Distribution Plots')
@@ -830,7 +865,7 @@ with tab4:
                 filtered = filtered[filtered['branch'].isin(branches)]
             
             st.write(f"**Found {len(filtered)} students in this range.**")
-            st.dataframe(filtered[['rollno', 'email', 'branch', 'cpi']], hide_index=True, use_container_width=True)
+            st.dataframe(filtered[['rollno', 'email', 'branch', 'cpi']], hide_index=True, width='stretch')
 
         elif cpi_page == 'Top Students per Branch':
             st.subheader('Top Academic Performers')
@@ -840,7 +875,7 @@ with tab4:
             for branch in selected_branches:
                 with st.expander(f"Top performers in {branch}"):
                     top = cpi_df[cpi_df['branch'] == branch].nlargest(int(n), 'cpi')[['rollno', 'email', 'cpi']]
-                    st.dataframe(top, hide_index=True, use_container_width=True)
+                    st.dataframe(top, hide_index=True, width='stretch')
 
         elif cpi_page == 'Branch Comparisons':
             st.subheader('Cross-Branch Analysis')
@@ -852,7 +887,7 @@ with tab4:
                 comp_df.columns = ['Branch', 'Avg CPI', 'Std Dev', 'Max CPI', 'Min CPI', 'Students']
                 
                 st.write("#### Statistical Comparison")
-                st.dataframe(comp_df.round(2), hide_index=True, use_container_width=True)
+                st.dataframe(comp_df.round(2), hide_index=True, width='stretch')
                 
                 fig, ax = plt.subplots(figsize=(10, 6))
                 sns.barplot(data=comp_df, x='Branch', y='Avg CPI', ax=ax, palette='coolwarm')
@@ -922,8 +957,10 @@ with tab5:
     
     conn = get_db_connection()
     
-    # Search bar
-    search_query = st.text_input("🔍 Search Company", placeholder="Type company name...")
+    # Company selector (searchable dropdown)
+    companies_list = pd.read_sql("SELECT DISTINCT company_name FROM company_visits WHERE company_name IS NOT NULL ORDER BY company_name", conn)
+    company_options = ["All"] + companies_list['company_name'].dropna().tolist()
+    selected_company = st.selectbox("🔍 Select Company", company_options, index=0)
     
     # Filters
     col1, col2, col3 = st.columns(3)
@@ -944,10 +981,10 @@ with tab5:
     query = "SELECT * FROM company_visits WHERE 1=1"
     params = []
     
-    # Add search filter
-    if search_query:
-        query += " AND company_name LIKE ?"
-        params.append(f"%{search_query}%")
+    # Add company filter from selectbox
+    if selected_company and selected_company != "All":
+        query += " AND LOWER(company_name) = LOWER(?)"
+        params.append(selected_company)
     
     if min_ctc > 0:
         query += " AND (ctc_lpa >= ? OR ctc_inr >= ?)"
