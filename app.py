@@ -1057,11 +1057,17 @@ with tab5:
     
     conn = get_db_connection()
     
-    # Company selector (searchable dropdown) - Restrict to 2021/2022
-    companies_list = pd.read_sql("SELECT DISTINCT company_name FROM company_visits WHERE placement_year IN ('2021', '2022', '2021-22', '2022-23') ORDER BY company_name", conn)
-    # Use index=None to create a searchable placeholder experience
-    company_options = sorted(companies_list['company_name'].dropna().tolist())
-    selected_company = st.selectbox("🔍 Select Company", company_options, index=None, placeholder="Type to search company name...")
+    # Company selector (searchable dropdown) - Fetch from ALL available years
+    companies_list = pd.read_sql("SELECT DISTINCT company_name FROM company_visits ORDER BY company_name", conn)
+    
+    if companies_list.empty:
+        st.error("No companies found in 'company_visits' table. Please check if data was scraped correctly.")
+        company_options = []
+    else:
+        # Use index=None to create a searchable placeholder experience
+        company_options = sorted(companies_list['company_name'].dropna().tolist())
+        
+    selected_company = st.selectbox("🔍 Select Company", company_options, index=None, placeholder="Type to search company name (or leave empty for all)...")
     
     # Filters
     col1, col2, col3 = st.columns(3)
@@ -1078,8 +1084,8 @@ with tab5:
     with col3:
         sort_by = st.selectbox("Sort by", ["Company Name", "CTC (High to Low)", "CTC (Low to High)"])
     
-    # Build query
-    query = "SELECT * FROM company_visits WHERE placement_year IN ('2021', '2022', '2021-22', '2022-23')"
+    # Build query - Allow all years by default or filter if needed
+    query = "SELECT * FROM company_visits WHERE 1=1" 
     params = []
     
     # Add company filter from selectbox
