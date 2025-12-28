@@ -63,7 +63,8 @@ def init_db():
             email TEXT,
             name TEXT,
             branch TEXT,
-            year TEXT
+            year TEXT,
+            cpi REAL
         )
     ''')
     
@@ -253,6 +254,15 @@ def process_files():
     files = sorted([f for f in os.listdir(RAW_DIR) if f.endswith(".json")])
     print(f"Processing {len(files)} files...")
     
+    # Load CPI mapping
+    roll_to_cpi = {}
+    if os.path.exists('alot_LM (2).csv'):
+        import pandas as pd
+        cpi_df = pd.read_csv('alot_LM (2).csv', skipinitialspace=True)
+        # Convert rollno to string and strip space
+        cpi_df['rollno'] = cpi_df['rollno'].astype(str).str.strip()
+        roll_to_cpi = dict(zip(cpi_df['rollno'], cpi_df['cpi']))
+    
     student_cache = {} # Map roll_no -> student_id
     
     for fname in files:
@@ -378,8 +388,10 @@ def process_files():
                 
                 # Finally Insert if still not found
                 if not student_id:
-                    c.execute("INSERT INTO students (roll_no, email, name, branch, year) VALUES (?, ?, ?, ?, ?)",
-                              (roll, email, name, branch, year))
+                    # Get CPI from mapping if available
+                    student_cpi = roll_to_cpi.get(str(roll))
+                    c.execute("INSERT INTO students (roll_no, email, name, branch, year, cpi) VALUES (?, ?, ?, ?, ?, ?)",
+                              (roll, email, name, branch, year, student_cpi))
                     student_id = c.lastrowid
                     if roll: student_cache[roll] = student_id
                 

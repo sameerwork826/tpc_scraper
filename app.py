@@ -38,6 +38,12 @@ def load_cpi_data():
             return 'Unknown'
 
         df['branch'] = df['email'].apply(extract_branch)
+        
+        # Filter for 2021 and 2022 only as requested
+        df['year_code'] = df['rollno'].astype(str).str[:2]
+        df['year'] = df['year_code'].apply(lambda x: "20" + x if x.isdigit() and len(x) == 2 else "Unknown")
+        df = df[df['year'].isin(['2021', '2022'])]
+        
         return df
     except Exception as e:
         return pd.DataFrame()
@@ -118,35 +124,54 @@ def run_query(query, params=None):
 
 # ... (run_query ends)
 
-def generate_sql(question, model_name, provider, history=None):
+def generate_ai_response(question, model_name, provider, history=None):
     # Schema Definition for the LLM
     schema = """
-    Table: events
-    Columns: id (INTEGER), company_name (TEXT), event_type (TEXT), raw_filename (TEXT), topic_url (TEXT)
-    
     Table: students
     Columns: id (INTEGER), roll_no (TEXT), email (TEXT), name (TEXT), branch (TEXT), year (TEXT), cpi (REAL)
     
+    Table: events
+    Columns: id (INTEGER), company_name (TEXT), event_type (TEXT), topic_url (TEXT)
+    
     Table: event_students
-    Columns: id (INTEGER), student_id (INTEGER), event_id (INTEGER), raw_line (TEXT)
+    Columns: id (INTEGER), student_id (INTEGER), event_id (INTEGER)
     Foreign Keys: student_id -> students.id, event_id -> events.id
+    
+    Table: company_ctc
+    Columns: id (INTEGER), company_name (TEXT), ctc_lpa (REAL), ctc_inr (REAL), inhand_lpa (REAL), inhand_inr (REAL)
+    
+    Table: company_visits
+    Columns: id (INTEGER), company_name (TEXT), role (TEXT), placement_year (TEXT), ctc_lpa (REAL), ctc_inr (REAL), location (TEXT), jd_link (TEXT), eligibility_cgpa (REAL)
     """
     
     prompt_text = f"""
-    You are a SQL Expert for SQLite. Convert the natural language question into a SQL query.
+    You are a premium AI Assistant for the IIT BHU Placement Cell. You are not just a SQL translator; you are a holistic guide.
     
+    Available Data (Schema):
     {schema}
     
-    Rules:
-    1. Return ONLY the SQL. No markdown.
-    2. JOIN logic: students -> event_students -> events.
-    3. Multi-part name matching: `s.name LIKE '%Part1%' AND s.name LIKE '%Part2%'`.
-    4. Offer types: 'Offer', 'PPO', 'Pre-Placement'.
-    5. Columns: `s.name, s.roll_no, s.branch, s.cpi, e.company_name, e.event_type`.
-    6. CPI queries: Use `s.cpi` for CPI-based filtering (e.g., `WHERE s.cpi > 9.0`).
+    YOUR GOAL: Decide if the user's question requires querying the database or if it can be answered directly using your internal knowledge or general advice.
     
-    Question: {question}
-    SQL:
+    STRICT FORMATTING RULE:
+    - If you need to query the database, start your response with 'SQL:' followed ONLY by the SQL query.
+    - If you are answering directly (vague questions, advice, general info), start your response with 'DIRECT:' followed by your answer in Markdown.
+    
+    SQL RULES (If using SQL):
+    1. YEAR CONSTRAINT: ONLY query data where `students.year` OR `company_visits.placement_year` is IN ('2021', '2022').
+    2. JOIN LOGIC:
+       - Link Students to Companies: `students s JOIN event_students es ON s.id = es.student_id JOIN events e ON es.event_id = e.id`.
+       - Salaries: `LEFT JOIN company_ctc cc ON LOWER(e.company_name) = LOWER(cc.company_name)`.
+    3. OFFER TYPES: Filter `e.event_type` using `LIKE '%Offer%'`, `LIKE '%PPO%'`, or `LIKE '%Pre-Placement%'`.
+    4. NAME MATCHING: Use `LIKE '%name%'`.
+    5. No markdown code blocks for SQL.
+    
+    DIRECT TALK RULES (If using DIRECT):
+    - Be helpful and professional. 
+    - Use your knowledge of IIT BHU, TPC (Training and Placement Cell), and general interview/placement advice.
+    - If asked about "data", explain what info we have (2021-22 placements, company visits, salaries, branches).
+    
+    User Question: {question}
+    Response:
     """
     
     llm = get_llm(provider, model_name)
@@ -158,14 +183,10 @@ def generate_sql(question, model_name, provider, history=None):
     
     try:
         response = llm.invoke(messages)
-        sql = response.content.replace("```sql", "").replace("```", "").replace("sql", "").strip()
-        # Basic cleanup if model includes reasoning/text
-        if "SELECT" in sql.upper():
-            start = sql.upper().find("SELECT")
-            sql = sql[start:]
-        return sql
+        content = response.content.strip()
+        return content
     except Exception as e:
-        return f"Error generating SQL: {e}"
+        return f"Error generating strategy: {e}"
 
 def generate_natural_answer(question, sql, df, model_name, provider, history=None):
     # safe-guard for large results
@@ -175,20 +196,22 @@ def generate_natural_answer(question, sql, df, model_name, provider, history=Non
         data_context = df.to_markdown(index=False)
 
     prompt_text = f"""
-    You are a helpful assistant for the IIT BHU Placement Cell.
+    You are a premium AI Assistant for the IIT BHU Placement Cell. 
+    You have access to detailed placement statistics, student profiles, and company visit records for 2021-2022.
     
     User Question: {question}
-    Executed SQL: {sql}
+    {f"Executed Query: {sql}" if sql else ""}
     Result Data:
     {data_context}
     
-    Task: Answer the user's question naturally based ONLY on the result data.
+    Task: Provide a detailed, helpful, and naturally phrased answer.
     
-    Rules:
-    - No Hallucinations: Use only given data.
-    - If empty result, say "I couldn't find any records."
-    - Use bullet points and bold text.
-    - Do NOT mention "SQL" or "dataframe".
+    Rules for response:
+    - BE COMPREHENSIVE: Summarize findings, trends, or insights.
+    - FALLBACK KNOWLEDGE: If the result data is empty or insufficient, use your internal knowledge to provide a helpful response (e.g., if asked about a company we don't have record of, tell the user what that company usually hires for or their reputation).
+    - TRANSPARENCY: If providing info from internal knowledge because DB data was missing, mention it politely (e.g., "While I don't have specific data for this in our 2021-22 records, generally...").
+    - PRISTINE FORMATTING: Use Markdown tables, bold text, and bullet points.
+    - NO TECHNICAL JARGON: Do NOT mention "SQL", "dataframe", or "query".
     """
     
     llm = get_llm(provider, model_name)
@@ -297,7 +320,7 @@ with st.sidebar:
     st.title("🎓 TPC Bot")
     
     # New Chat Button (Top)
-    if st.button("➕ New Chat", use_container_width=True):
+    if st.button("➕ New Chat", width='stretch'):
         st.session_state.current_chat_id = str(uuid.uuid4())
         st.session_state.messages = []
         st.rerun()
@@ -333,7 +356,7 @@ with st.sidebar:
             
             # Note: We can't easily change button style per-button in Streamlit without hacky CSS
             # But we can use the key to keep it distinct.
-            if st.button(btn_label, key=f"hist_{chat_id}", use_container_width=True):
+            if st.button(btn_label, key=f"hist_{chat_id}", width='stretch'):
                 st.session_state.current_chat_id = chat_id
                 st.session_state.messages = chat_data.get("messages", [])
                 st.rerun()
@@ -434,9 +457,15 @@ with st.sidebar:
 # Database Stats
 conn = get_db_connection()
 c = conn.cursor()
-c.execute("SELECT COUNT(DISTINCT roll_no) FROM students")
+c.execute("SELECT COUNT(DISTINCT roll_no) FROM students WHERE year IN ('2021', '2022')")
 total_students = c.fetchone()[0]
-c.execute("SELECT COUNT(DISTINCT company_name) FROM events")
+c.execute("""
+    SELECT COUNT(DISTINCT company_name) 
+    FROM events e 
+    JOIN event_students es ON e.id = es.event_id 
+    JOIN students s ON es.student_id = s.id 
+    WHERE s.year IN ('2021', '2022')
+""")
 total_companies = c.fetchone()[0]
 conn.close()
 
@@ -457,7 +486,7 @@ conn.close()
 #                 st.error(f"Error: {e}")
 
 # Main Interface Tabs
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["💬 Chat Assistant", "🔍 Student Explorer", "🏢 Company Explorer", "📊 CPI Visualizer", "📅 Company Calendar"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["💬 Chat Assistant", "🔍 Student Explorer", "🏢 Company Explorer", "📊 CPI Visualizer", "📅 Company Calendar", "📈 Branch Statistics"])
 
 # --- TAB 1: CHAT ---
 with tab1:
@@ -489,45 +518,82 @@ with tab1:
         # Display user message immediately
         with st.chat_message("user"):
             st.markdown(prompt)
+        if "messages" not in st.session_state:
+            st.session_state.messages = []
         st.session_state.messages.append({"role": "user", "content": prompt})
 
         with st.chat_message("assistant"):
             message_placeholder = st.empty()
             message_placeholder.markdown("Thinking...")
-            
-            try:
-                # 1. Generate SQL
-                sql_query = generate_sql(prompt, selected_model, provider, st.session_state.messages[:-1])
-                
-                # 2. Execute SQL
-                result = run_query(sql_query)
-                
-                if isinstance(result, pd.DataFrame):
-                    # 3. Generate Natural Language Answer
-                    nl_response = generate_natural_answer(prompt, sql_query, result, selected_model, provider, st.session_state.messages[:-1])
-                    message_placeholder.markdown(nl_response)
+
+            # Basic provider/model validation
+            if provider == "Gemini" and not os.getenv("GOOGLE_API_KEY"):
+                err = "Gemini API key is missing. Please set it in the sidebar."
+                message_placeholder.error(err)
+                st.session_state.messages.append({"role": "assistant", "content": err})
+            elif provider == "Groq" and not os.getenv("GROQ_API_KEY"):
+                err = "Groq API key is missing. Please set it in the sidebar."
+                message_placeholder.error(err)
+                st.session_state.messages.append({"role": "assistant", "content": err})
+            elif not selected_model:
+                err = "No model selected. Choose a model in the sidebar."
+                message_placeholder.error(err)
+                st.session_state.messages.append({"role": "assistant", "content": err})
+            else:
+                try:
+                    # 1. Generate Strategy and SQL/DIRECT Response
+                    ai_raw_response = generate_ai_response(prompt, selected_model, provider, st.session_state.messages[:-1])
                     
-                    # Save to history
-                    st.session_state.messages.append({"role": "assistant", "content": nl_response})
+                    if ai_raw_response.startswith("DIRECT:"):
+                        answer = ai_raw_response.replace("DIRECT:", "").strip()
+                        message_placeholder.markdown(answer)
+                        st.session_state.messages.append({"role": "assistant", "content": answer})
                     
-                    with st.expander("View Technical Details (SQL & Data)"):
-                        st.code(sql_query, language="sql")
-                        st.dataframe(result)
-                else:
-                    message_placeholder.error(result)
-                    st.session_state.messages.append({"role": "assistant", "content": f"Error: {result}"})
+                    elif ai_raw_response.startswith("SQL:"):
+                        sql_query = ai_raw_response.replace("SQL:", "").strip()
+                        # Basic cleanup
+                        sql_query = sql_query.replace("```sql", "").replace("```", "").replace("sql", "").strip()
+                        if "SELECT" in sql_query.upper():
+                            start = sql_query.upper().find("SELECT")
+                            sql_query = sql_query[start:]
+                        
+                        # 2. Execute SQL
+                        result = run_query(sql_query)
+
+                        if isinstance(result, str) and result.startswith("Error"):
+                            message_placeholder.error(result)
+                            st.session_state.messages.append({"role": "assistant", "content": result})
+                        elif isinstance(result, pd.DataFrame):
+                            # 3. Generate Natural Language Answer (even if DF is empty, to allow fallback knowledge)
+                            nl_response = generate_natural_answer(prompt, sql_query, result, selected_model, provider, st.session_state.messages[:-1])
+                            if isinstance(nl_response, str) and nl_response.startswith("Error"):
+                                message_placeholder.error(nl_response)
+                                st.session_state.messages.append({"role": "assistant", "content": nl_response})
+                            else:
+                                message_placeholder.markdown(nl_response)
+                                st.session_state.messages.append({"role": "assistant", "content": nl_response})
+                                if not result.empty:
+                                    with st.expander("View Technical Details (SQL & Data)"):
+                                        st.code(sql_query, language="sql")
+                                        st.dataframe(result, width='stretch')
                     
-            except Exception as e:
-                message_placeholder.error(f"An error occurred: {e}")
-                st.session_state.messages.append({"role": "assistant", "content": f"An error occurred: {e}"})
-            
+                    else:
+                        # Fallback for unexpected response format
+                        message_placeholder.markdown(ai_raw_response)
+                        st.session_state.messages.append({"role": "assistant", "content": ai_raw_response})
+
+                except Exception as e:
+                    err = f"An unexpected error occurred: {e}"
+                    message_placeholder.error(err)
+                    st.session_state.messages.append({"role": "assistant", "content": err})
+
             # Save to persistent history after assistant responds
             st.session_state.chat_history[st.session_state.current_chat_id] = {
                 "timestamp": datetime.now().isoformat(),
                 "messages": st.session_state.messages
             }
             save_chat_history(st.session_state.chat_history)
-        
+
         # Use rerun to ensure the history loop takes over and pins the input box to the bottom
         st.rerun()
 
@@ -544,11 +610,11 @@ with tab2:
         selected_branch = st.selectbox("Filter by Branch", ["All"] + branches)
     
     with col2:
-        years = pd.read_sql("SELECT DISTINCT year FROM students WHERE year IS NOT NULL ORDER BY year", conn)['year'].tolist()
+        years = pd.read_sql("SELECT DISTINCT year FROM students WHERE year IN ('2021', '2022') ORDER BY year", conn)['year'].tolist()
         selected_year = st.selectbox("Filter by Year", ["All"] + years)
     
     # 2. Student Selector
-    query = "SELECT DISTINCT name, roll_no FROM students WHERE 1=1"
+    query = "SELECT DISTINCT name, roll_no FROM students WHERE year IN ('2021', '2022')"
     params = []
     if selected_branch != "All":
         query += " AND branch = ?"
@@ -710,7 +776,7 @@ with tab3:
                             JOIN students s ON es.student_id = s.id
                             JOIN events e ON es.event_id = e.id
                             LEFT JOIN company_ctc cc ON LOWER(e.company_name) = LOWER(cc.company_name)
-                            WHERE es.event_id IN ({placeholders})
+                            WHERE es.event_id IN ({placeholders}) AND s.year IN ('2021', '2022')
                             ORDER BY s.name
                         """
                         
@@ -747,7 +813,7 @@ with tab3:
                                 display_df = display_df[['name', 'roll_no', 'branch', 'year', 'CPI', 'CTC', 'In-hand']]
                                 display_df.columns = ["Name", "Roll No", "Branch", "Year", "CPI", "CTC", "In-hand"]
                                 
-                                st.dataframe(display_df, hide_index=True, use_container_width=True)
+                                st.dataframe(display_df, hide_index=True, width='stretch')
 
                 display_events_table(ft_events_df, "🎓 Full-Time")
                 display_events_table(intern_events_df, "💼 Internship")
@@ -785,7 +851,7 @@ with tab4:
             st.write("#### Branch-wise Student Distribution")
             branch_counts = cpi_df['branch'].value_counts().reset_index()
             branch_counts.columns = ['Branch', 'Count']
-            st.dataframe(branch_counts, hide_index=True, use_container_width=True)
+            st.dataframe(branch_counts, hide_index=True, width='stretch')
 
         elif cpi_page == 'Branch-wise Stats':
             st.subheader('Branch-wise Statistics')
@@ -798,7 +864,7 @@ with tab4:
             col2.metric("Avg CPI", round(branch_df['cpi'].mean(), 2))
             col3.metric("Max CPI", branch_df['cpi'].max())
             
-            st.dataframe(branch_df[['rollno', 'email', 'cpi']], hide_index=True, use_container_width=True)
+            st.dataframe(branch_df[['rollno', 'email', 'cpi']], hide_index=True, width='stretch')
 
         elif cpi_page == 'CPI Plots':
             st.subheader('CPI Distribution Plots')
@@ -830,7 +896,7 @@ with tab4:
                 filtered = filtered[filtered['branch'].isin(branches)]
             
             st.write(f"**Found {len(filtered)} students in this range.**")
-            st.dataframe(filtered[['rollno', 'email', 'branch', 'cpi']], hide_index=True, use_container_width=True)
+            st.dataframe(filtered[['rollno', 'email', 'branch', 'cpi']], hide_index=True, width='stretch')
 
         elif cpi_page == 'Top Students per Branch':
             st.subheader('Top Academic Performers')
@@ -840,7 +906,7 @@ with tab4:
             for branch in selected_branches:
                 with st.expander(f"Top performers in {branch}"):
                     top = cpi_df[cpi_df['branch'] == branch].nlargest(int(n), 'cpi')[['rollno', 'email', 'cpi']]
-                    st.dataframe(top, hide_index=True, use_container_width=True)
+                    st.dataframe(top, hide_index=True, width='stretch')
 
         elif cpi_page == 'Branch Comparisons':
             st.subheader('Cross-Branch Analysis')
@@ -852,7 +918,7 @@ with tab4:
                 comp_df.columns = ['Branch', 'Avg CPI', 'Std Dev', 'Max CPI', 'Min CPI', 'Students']
                 
                 st.write("#### Statistical Comparison")
-                st.dataframe(comp_df.round(2), hide_index=True, use_container_width=True)
+                st.dataframe(comp_df.round(2), hide_index=True, width='stretch')
                 
                 fig, ax = plt.subplots(figsize=(10, 6))
                 sns.barplot(data=comp_df, x='Branch', y='Avg CPI', ax=ax, palette='coolwarm')
@@ -917,13 +983,15 @@ with tab4:
 
 # --- TAB 5: COMPANY CALENDAR ---
 with tab5:
-    st.header("📅 Company Calendar 2025-26")
-    st.markdown("View upcoming company visits with CTC, role, and location details")
+    st.header("📅 Company Calendar (2021-2022)")
+    st.markdown("View company visits with CTC, role, and location details")
     
     conn = get_db_connection()
     
-    # Search bar
-    search_query = st.text_input("🔍 Search Company", placeholder="Type company name...")
+    # Company selector (searchable dropdown) - Restrict to 2021/2022
+    companies_list = pd.read_sql("SELECT DISTINCT company_name FROM company_visits WHERE placement_year IN ('2021', '2022', '2021-22', '2022-23') ORDER BY company_name", conn)
+    company_options = ["All"] + companies_list['company_name'].dropna().tolist()
+    selected_company = st.selectbox("🔍 Select Company", company_options, index=0)
     
     # Filters
     col1, col2, col3 = st.columns(3)
@@ -941,13 +1009,13 @@ with tab5:
         sort_by = st.selectbox("Sort by", ["Company Name", "CTC (High to Low)", "CTC (Low to High)"])
     
     # Build query
-    query = "SELECT * FROM company_visits WHERE 1=1"
+    query = "SELECT * FROM company_visits WHERE placement_year IN ('2021', '2022', '2021-22', '2022-23')"
     params = []
     
-    # Add search filter
-    if search_query:
-        query += " AND company_name LIKE ?"
-        params.append(f"%{search_query}%")
+    # Add company filter from selectbox
+    if selected_company != "All":
+        query += " AND LOWER(company_name) = LOWER(?)"
+        params.append(selected_company)
     
     if min_ctc > 0:
         query += " AND (ctc_lpa >= ? OR ctc_inr >= ?)"
@@ -1025,4 +1093,150 @@ with tab5:
     else:
         st.info("No companies found matching the filters.")
     
+    conn.close()
+
+# --- TAB 6: BRANCH STATISTICS ---
+with tab6:
+    st.header("📈 Branch-wise Placement Statistics")
+    
+    conn = get_db_connection()
+    
+    # Options to address warnings
+    pd.set_option('future.no_silent_downcasting', True)
+    
+    # 1. Branch and Year Selection
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        branches = pd.read_sql("SELECT DISTINCT branch FROM students WHERE branch IS NOT NULL ORDER BY branch", conn)['branch'].tolist()
+        selected_branch = st.selectbox("Select Branch", branches, key="branch_stats_select")
+    
+    with col_f2:
+        years = pd.read_sql("SELECT DISTINCT year FROM students WHERE year IN ('2021', '2022') ORDER BY year DESC", conn)['year'].tolist()
+        selected_year = st.selectbox("Select Year", ["All"] + years, key="branch_stats_year")
+    
+    if selected_branch:
+        year_suffix = f" for {selected_year}" if selected_year != "All" else " (2021-2022)"
+        st.markdown(f"### Statistics for {selected_branch}{year_suffix}")
+        
+        # 2. Fetch Aggregated Stats
+        # Build filters - Always restrict to 2021/2022
+        filters = "s.branch = ? AND s.year IN ('2021', '2022')"
+        params = [selected_branch]
+        if selected_year != "All":
+            filters = "s.branch = ? AND s.year = ?"
+            params = [selected_branch, selected_year]
+            
+        # Total Students in Branch/Year
+        total_students = pd.read_sql(f"SELECT COUNT(*) as count FROM students s WHERE {filters}", conn, params=params).iloc[0]['count']
+        
+        # Placement Data (Direct Join)
+        offer_query = f"""
+            SELECT s.id, s.name, e.event_type, e.company_name, 
+                   cc.ctc_lpa, cc.ctc_inr
+            FROM students s
+            JOIN event_students es ON s.id = es.student_id
+            JOIN events e ON es.event_id = e.id
+            LEFT JOIN company_ctc cc ON LOWER(e.company_name) = LOWER(cc.company_name)
+            WHERE {filters} AND (e.event_type LIKE '%Offer%' OR e.event_type LIKE '%PPO%' OR e.event_type LIKE '%Pre-Placement%')
+        """
+        offers_df = pd.read_sql(offer_query, conn, params=params)
+        
+        # Interview Shortlists (Direct Join)
+        shortlist_query = f"""
+            SELECT s.id, e.event_type
+            FROM students s
+            JOIN event_students es ON s.id = es.student_id
+            JOIN events e ON es.event_id = e.id
+            WHERE {filters} AND e.event_type LIKE '%Interview%'
+        """
+        shortlists_df = pd.read_sql(shortlist_query, conn, params=params)
+        
+        # Calculate Metrics
+        offers_df['lpa_equiv'] = offers_df['ctc_lpa'].fillna(offers_df['ctc_inr'] / 100000.0)
+        
+        placed_students_ids = offers_df['id'].unique()
+        no_placed = len(placed_students_ids)
+        
+        # Count unique students for PPO and FT
+        ppo_students = offers_df[offers_df['event_type'].str.contains('PPO|Pre-Placement', case=False, na=False)]['id'].unique()
+        ppo_count = len(ppo_students)
+        
+        ft_students = offers_df[offers_df['event_type'].str.contains('FT Offer', case=False, na=False)]['id'].unique()
+        ft_count = len(ft_students)
+        
+        placement_percentage = (no_placed / total_students * 100) if total_students > 0 else 0
+        
+        # Average Package Calculation: One (highest) offer per student
+        best_offers_per_student = offers_df.sort_values('lpa_equiv', ascending=False).drop_duplicates('id')
+        avg_package = best_offers_per_student['lpa_equiv'].mean() if not best_offers_per_student['lpa_equiv'].dropna().empty else 0
+        
+        # Display Metrics
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Students", total_students)
+        col2.metric("Placed Students", no_placed)
+        col3.metric("Placement %", f"{placement_percentage:.2f}%")
+        
+        col4, col5, col6 = st.columns(3)
+        col4.metric("PPO Offers", ppo_count)
+        col5.metric("FT Offers", ft_count)
+        col6.metric("Avg Package", f"{avg_package:.2f} LPA" if avg_package > 0 else "N/A")
+        
+        st.markdown("---")
+        st.subheader("Student Details")
+        
+        # 3. Build Detailed Student Table
+        student_details = []
+        
+        # Get students in this branch/year
+        all_students_in_branch = pd.read_sql(f"SELECT id, name, cpi FROM students s WHERE {filters} ORDER BY name", conn, params=params)
+        
+        for _, student in all_students_in_branch.iterrows():
+            sid = student['id']
+            sname = student['name']
+            scpi = student['cpi']
+            
+            # Shortlists
+            s_shortlists = len(shortlists_df[shortlists_df['id'] == sid])
+            
+            # Offers
+            s_offers = offers_df[offers_df['id'] == sid]
+            
+            offer_types = []
+            offer_companies = []
+            offer_ctcs = []
+            
+            if not s_offers.empty:
+                for _, row in s_offers.iterrows():
+                    etype = row['event_type'].lower()
+                    if 'ppo' in etype or 'pre-placement' in etype:
+                        offer_types.append("PPO")
+                    else:
+                        offer_types.append("FT")
+                    
+                    offer_companies.append(row['company_name'])
+                    
+                    ctc_val = row['ctc_lpa']
+                    if pd.isna(ctc_val) and pd.notna(row['ctc_inr']):
+                        ctc_val = row['ctc_inr'] / 100000.0
+                    
+                    if pd.notna(ctc_val):
+                        offer_ctcs.append(f"{ctc_val:.2f} LPA")
+                    else:
+                        offer_ctcs.append("N/A")
+            
+            student_details.append({
+                "Student Name": sname,
+                "CPI": scpi if pd.notna(scpi) else "-",
+                "Shortlists": s_shortlists,
+                "Offer Type": ", ".join(list(set(offer_types))) if offer_types else "-",
+                "Offer Company": ", ".join(list(set(offer_companies))) if offer_companies else "-",
+                "Offer CTC": ", ".join(offer_ctcs) if offer_ctcs else "-"
+            })
+            
+        if student_details:
+            details_df = pd.DataFrame(student_details)
+            st.dataframe(details_df, hide_index=True, width='stretch')
+        else:
+            st.info("No student data found for this branch.")
+            
     conn.close()
