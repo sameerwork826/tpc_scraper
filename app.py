@@ -836,7 +836,8 @@ with tab4:
             'CPI Range Filter', 
             'Top Students per Branch', 
             'Branch Comparisons',
-            'Distribution Analysis'
+            'Distribution Analysis',
+            'Student Search'
         ])
         
         st.markdown("---")
@@ -978,6 +979,74 @@ with tab4:
                         st.info("Sample size too small for statistical normality testing.")
             else:
                 st.warning("Please select at least one branch.")
+        
+        elif cpi_page == 'Student Search':
+            st.subheader('🔍 Student Performance Search')
+            
+            # Use DB for name search since CSV only has emails
+            conn_search = get_db_connection()
+            search_query = "SELECT name, roll_no, branch, cpi FROM students WHERE year IN ('2021', '2022') ORDER BY name"
+            search_df = pd.read_sql(search_query, conn_search)
+            conn_search.close()
+            
+            if not search_df.empty:
+                # Create search options
+                search_df['display'] = search_df['name'] + " (" + search_df['roll_no'] + ")"
+                student_choice = st.selectbox("Search by Name or Roll No", search_df['display'].tolist(), index=None, placeholder="Start typing name...")
+                
+                if student_choice:
+                    st.markdown("---")
+                    # Extract roll no
+                    roll_no = student_choice.split("(")[-1].strip(")")
+                    
+                    # 1. Get DB Info
+                    db_info = search_df[search_df['roll_no'] == roll_no].iloc[0]
+                    
+                    # 2. Get CSV Stats Info (for ranking)
+                    csv_info = cpi_df[cpi_df['rollno'] == roll_no]
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write("#### Student Profile")
+                        st.write(f"**Name:** {db_info['name']}")
+                        st.write(f"**Roll No:** {roll_no}")
+                        st.write(f"**Branch:** {db_info['branch']}")
+                        
+                        # CPI Display
+                        cpi_val = db_info['cpi']
+                        if not pd.isna(cpi_val):
+                             st.metric("CPI", f"{cpi_val:.2f}")
+                        elif not csv_info.empty:
+                             st.metric("CPI", f"{csv_info.iloc[0]['cpi']:.2f}")
+                        else:
+                             st.metric("CPI", "N/A")
+
+                    with col2:
+                        st.write("#### Relative Performance")
+                        if not csv_info.empty:
+                            s_cpi = csv_info.iloc[0]['cpi']
+                            s_branch = csv_info.iloc[0]['branch']
+                            
+                            # Branch Rank
+                            branch_data = cpi_df[cpi_df['branch'] == s_branch]
+                            branch_rank = branch_data[branch_data['cpi'] > s_cpi].shape[0] + 1
+                            total_branch = len(branch_data)
+                            
+                            # Overall Rank
+                            overall_rank = cpi_df[cpi_df['cpi'] > s_cpi].shape[0] + 1
+                            total_overall = len(cpi_df)
+                            
+                            st.metric("Branch Rank", f"#{branch_rank} / {total_branch}")
+                            st.metric("Overall Rank", f"#{overall_rank} / {total_overall}")
+                            
+                            # Percentile
+                            percentile = stats.percentileofscore(branch_data['cpi'], s_cpi)
+                            st.progress(percentile / 100)
+                            st.caption(f"Better than {percentile:.1f}% of {s_branch} students")
+                        else:
+                            st.warning("Detailed statistical data not found for this student (missing in CSV).")
+            else:
+                st.error("No students found in database.")
 
     conn.close()
 
@@ -990,8 +1059,9 @@ with tab5:
     
     # Company selector (searchable dropdown) - Restrict to 2021/2022
     companies_list = pd.read_sql("SELECT DISTINCT company_name FROM company_visits WHERE placement_year IN ('2021', '2022', '2021-22', '2022-23') ORDER BY company_name", conn)
-    company_options = ["All"] + companies_list['company_name'].dropna().tolist()
-    selected_company = st.selectbox("🔍 Select Company", company_options, index=0)
+    # Use index=None to create a searchable placeholder experience
+    company_options = sorted(companies_list['company_name'].dropna().tolist())
+    selected_company = st.selectbox("🔍 Select Company", company_options, index=None, placeholder="Type to search company name...")
     
     # Filters
     col1, col2, col3 = st.columns(3)
@@ -1013,7 +1083,7 @@ with tab5:
     params = []
     
     # Add company filter from selectbox
-    if selected_company != "All":
+    if selected_company:
         query += " AND LOWER(company_name) = LOWER(?)"
         params.append(selected_company)
     
