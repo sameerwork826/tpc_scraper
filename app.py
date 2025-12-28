@@ -142,33 +142,37 @@ def generate_ai_response(question, model_name, provider, history=None):
     
     Table: company_visits
     Columns: id (INTEGER), company_name (TEXT), role (TEXT), placement_year (TEXT), ctc_lpa (REAL), ctc_inr (REAL), location (TEXT), jd_link (TEXT), eligibility_cgpa (REAL)
+
+    Table: student_placement_summary (VIEW - PREFERRED FOR QUERYING)
+    Columns: id (INTEGER), student_id (INTEGER), roll_no (TEXT), email (TEXT), name (TEXT), branch (TEXT), year (TEXT), cpi (REAL), company_name (TEXT), event_type (TEXT), ctc_lpa (REAL), ctc_inr (REAL), inhand_lpa (REAL), inhand_inr (REAL), topic_url (TEXT)
     """
     
     prompt_text = f"""
-    You are a premium AI Assistant for the IIT BHU Placement Cell. You are not just a SQL translator; you are a holistic guide.
+    You are a premium AI Assistant for the IIT BHU Placement Cell. 
     
     Available Data (Schema):
     {schema}
     
-    YOUR GOAL: Decide if the user's question requires querying the database or if it can be answered directly using your internal knowledge or general advice.
+    YOUR GOAL: ALWAYS query the database for facts. Only answer DIRECTLY if the user greets you or asks for general advice (non-data questions).
     
-    STRICT FORMATTING RULE:
-    - If you need to query the database, start your response with 'SQL:' followed ONLY by the SQL query.
-    - If you are answering directly (vague questions, advice, general info), start your response with 'DIRECT:' followed by your answer in Markdown.
+    STRICT DECISION RULES:
+    - Does the question imply looking up a student, company, placement statistic, or count? -> MUST generates SQL.
+    - Does the question refer to "him", "her", "it", "they" (context)? -> Look at the chat history, identify the entity, and generate SQL for that entity.
     
-    SQL RULES (If using SQL):
-    1. YEAR CONSTRAINT: ONLY query data where `students.year` OR `company_visits.placement_year` is IN ('2021', '2022').
-    2. JOIN LOGIC:
-       - Link Students to Companies: `students s JOIN event_students es ON s.id = es.student_id JOIN events e ON es.event_id = e.id`.
-       - Salaries: `LEFT JOIN company_ctc cc ON LOWER(e.company_name) = LOWER(cc.company_name)`.
-    3. OFFER TYPES: Filter `e.event_type` using `LIKE '%Offer%'`, `LIKE '%PPO%'`, or `LIKE '%Pre-Placement%'`.
-    4. NAME MATCHING: Use `LIKE '%name%'`.
-    5. No markdown code blocks for SQL.
+    FORMATTING:
+    - 'SQL:' followed by the query.
+    - 'DIRECT:' followed by the answer.
     
-    DIRECT TALK RULES (If using DIRECT):
-    - Be helpful and professional. 
-    - Use your knowledge of IIT BHU, TPC (Training and Placement Cell), and general interview/placement advice.
-    - If asked about "data", explain what info we have (2021-22 placements, company visits, salaries, branches).
+    SQL RULES:
+    1. **Primary Source**: `FROM student_placement_summary` (It has everything).
+    2. **Context**: If user asks "What is his CPI?", find the distinct student mentioned in history and query `SELECT cpi FROM student_placement_summary WHERE name LIKE ...`.
+    3. **Name Matching**: `name LIKE '%Part1%Part2%'` (e.g. `'%Sameer%Wanjari%'`).
+    4. **Roll No**: `roll_no = '21174028'`.
+    5. **Clean Output**: Just the SQL. No markdown.
+    
+    DIRECT TALK RULES (Only for greetings/advice):
+    - Do NOT make up data.
+    - If you can't find data in DB, say "No record found".
     
     User Question: {question}
     Response:
@@ -204,13 +208,14 @@ def generate_natural_answer(question, sql, df, model_name, provider, history=Non
     Result Data:
     {data_context}
     
-    Task: Provide a detailed, helpful, and naturally phrased answer.
+    Task: Answer the user's question clearly and concisely based on the data.
     
     Rules for response:
-    - BE COMPREHENSIVE: Summarize findings, trends, or insights.
-    - FALLBACK KNOWLEDGE: If the result data is empty or insufficient, use your internal knowledge to provide a helpful response (e.g., if asked about a company we don't have record of, tell the user what that company usually hires for or their reputation).
-    - TRANSPARENCY: If providing info from internal knowledge because DB data was missing, mention it politely (e.g., "While I don't have specific data for this in our 2021-22 records, generally...").
-    - PRISTINE FORMATTING: Use Markdown tables, bold text, and bullet points.
+    - CONCISENESS IS KEY: Direct answers are better. Only provide summary/trends if explicitly asked or if the data is complex.
+    - MAINTAIN CONTEXT: If the user refers to previous topics (like "what about him?"), use the chat history to understand.
+    - NO FLUFF: Avoid "Based on the provided data" or "Here is the analysis". Just give the answer.
+    - FALLBACK KNOWLEDGE: If the table is empty, politely use your internal knowledge about the company/topic if possible.
+    - PRISTINE FORMATTING: Use Markdown tables/bullets only when helpful for readability.
     - NO TECHNICAL JARGON: Do NOT mention "SQL", "dataframe", or "query".
     """
     
