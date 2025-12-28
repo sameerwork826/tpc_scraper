@@ -124,7 +124,7 @@ def run_query(query, params=None):
 
 # ... (run_query ends)
 
-def generate_sql(question, model_name, provider, history=None):
+def generate_ai_response(question, model_name, provider, history=None):
     # Schema Definition for the LLM
     schema = """
     Table: students
@@ -145,25 +145,33 @@ def generate_sql(question, model_name, provider, history=None):
     """
     
     prompt_text = f"""
-    You are an expert SQL Generator for a SQLite database containing IIT BHU placement data.
+    You are a premium AI Assistant for the IIT BHU Placement Cell. You are not just a SQL translator; you are a holistic guide.
     
+    Available Data (Schema):
     {schema}
     
-    STRICT RULES:
-    1. Return ONLY the SQL query. No markdown formatting, no explanations.
-    2. YEAR CONSTRAINT: ONLY query data where `students.year` OR `company_visits.placement_year` is IN ('2021', '2022').
-    3. JOIN LOGIC:
-       - To link Students to Companies/Events: `students s JOIN event_students es ON s.id = es.student_id JOIN events e ON es.event_id = e.id`.
-       - To get salary info: `LEFT JOIN company_ctc cc ON LOWER(e.company_name) = LOWER(cc.company_name)`.
-    4. SALARY QUERIES:
-       - Use `COALESCE(cc.ctc_lpa, cc.ctc_inr / 100000.0)` for CTC calculations if querying from `events`.
-       - For `company_visits`, use `ctc_lpa`.
-    5. OFFER TYPES: Filter `e.event_type` using `LIKE '%Offer%'`, `LIKE '%PPO%'`, or `LIKE '%Pre-Placement%'`.
-    6. NAME MATCHING: Use `LIKE '%name%'` for student or company names.
-    7. COLUMN SELECTION: Always include relevant columns like `s.name`, `s.roll_no`, `e.company_name`, `cc.ctc_lpa` where appropriate.
+    YOUR GOAL: Decide if the user's question requires querying the database or if it can be answered directly using your internal knowledge or general advice.
     
-    Question: {question}
-    SQL:
+    STRICT FORMATTING RULE:
+    - If you need to query the database, start your response with 'SQL:' followed ONLY by the SQL query.
+    - If you are answering directly (vague questions, advice, general info), start your response with 'DIRECT:' followed by your answer in Markdown.
+    
+    SQL RULES (If using SQL):
+    1. YEAR CONSTRAINT: ONLY query data where `students.year` OR `company_visits.placement_year` is IN ('2021', '2022').
+    2. JOIN LOGIC:
+       - Link Students to Companies: `students s JOIN event_students es ON s.id = es.student_id JOIN events e ON es.event_id = e.id`.
+       - Salaries: `LEFT JOIN company_ctc cc ON LOWER(e.company_name) = LOWER(cc.company_name)`.
+    3. OFFER TYPES: Filter `e.event_type` using `LIKE '%Offer%'`, `LIKE '%PPO%'`, or `LIKE '%Pre-Placement%'`.
+    4. NAME MATCHING: Use `LIKE '%name%'`.
+    5. No markdown code blocks for SQL.
+    
+    DIRECT TALK RULES (If using DIRECT):
+    - Be helpful and professional. 
+    - Use your knowledge of IIT BHU, TPC (Training and Placement Cell), and general interview/placement advice.
+    - If asked about "data", explain what info we have (2021-22 placements, company visits, salaries, branches).
+    
+    User Question: {question}
+    Response:
     """
     
     llm = get_llm(provider, model_name)
@@ -175,14 +183,10 @@ def generate_sql(question, model_name, provider, history=None):
     
     try:
         response = llm.invoke(messages)
-        sql = response.content.replace("```sql", "").replace("```", "").replace("sql", "").strip()
-        # Basic cleanup if model includes reasoning/text
-        if "SELECT" in sql.upper():
-            start = sql.upper().find("SELECT")
-            sql = sql[start:]
-        return sql
+        content = response.content.strip()
+        return content
     except Exception as e:
-        return f"Error generating SQL: {e}"
+        return f"Error generating strategy: {e}"
 
 def generate_natural_answer(question, sql, df, model_name, provider, history=None):
     # safe-guard for large results
@@ -196,18 +200,18 @@ def generate_natural_answer(question, sql, df, model_name, provider, history=Non
     You have access to detailed placement statistics, student profiles, and company visit records for 2021-2022.
     
     User Question: {question}
-    Executed Query: {sql}
+    {f"Executed Query: {sql}" if sql else ""}
     Result Data:
     {data_context}
     
-    Task: Provide a detailed, helpful, and naturally phrased answer based ONLY on the result data.
+    Task: Provide a detailed, helpful, and naturally phrased answer.
     
-    Rules:
-    - BE COMPREHENSIVE: If the result contains multiple rows, summarize the key findings (e.g., average CTC, top branches, or trends).
-    - PRISTINE FORMATTING: Use Markdown tables (if appropriate), bold text for emphasis, and clear bullet points.
-    - NO HALLUCINATIONS: If the result is empty, politely inform the user that no records were found for the specific query.
-    - TONE: Professional yet friendly, like a helpful placement coordinator.
-    - CONSTRAINTS: Do NOT mention technical terms like "SQL", "dataframe", or "query".
+    Rules for response:
+    - BE COMPREHENSIVE: Summarize findings, trends, or insights.
+    - FALLBACK KNOWLEDGE: If the result data is empty or insufficient, use your internal knowledge to provide a helpful response (e.g., if asked about a company we don't have record of, tell the user what that company usually hires for or their reputation).
+    - TRANSPARENCY: If providing info from internal knowledge because DB data was missing, mention it politely (e.g., "While I don't have specific data for this in our 2021-22 records, generally...").
+    - PRISTINE FORMATTING: Use Markdown tables, bold text, and bullet points.
+    - NO TECHNICAL JARGON: Do NOT mention "SQL", "dataframe", or "query".
     """
     
     llm = get_llm(provider, model_name)
@@ -537,45 +541,47 @@ with tab1:
                 st.session_state.messages.append({"role": "assistant", "content": err})
             else:
                 try:
-                    # 1. Generate SQL (LLM may return an error string)
-                    sql_query = generate_sql(prompt, selected_model, provider, st.session_state.messages[:-1])
+                    # 1. Generate Strategy and SQL/DIRECT Response
+                    ai_raw_response = generate_ai_response(prompt, selected_model, provider, st.session_state.messages[:-1])
+                    
+                    if ai_raw_response.startswith("DIRECT:"):
+                        answer = ai_raw_response.replace("DIRECT:", "").strip()
+                        message_placeholder.markdown(answer)
+                        st.session_state.messages.append({"role": "assistant", "content": answer})
+                    
+                    elif ai_raw_response.startswith("SQL:"):
+                        sql_query = ai_raw_response.replace("SQL:", "").strip()
+                        # Basic cleanup
+                        sql_query = sql_query.replace("```sql", "").replace("```", "").replace("sql", "").strip()
+                        if "SELECT" in sql_query.upper():
+                            start = sql_query.upper().find("SELECT")
+                            sql_query = sql_query[start:]
+                        
+                        # 2. Execute SQL
+                        result = run_query(sql_query)
 
-                    # If generate_sql returned an error string, show it
-                    if isinstance(sql_query, str) and sql_query.startswith("Error"):
-                        message_placeholder.error(sql_query)
-                        st.session_state.messages.append({"role": "assistant", "content": sql_query})
+                        if isinstance(result, str) and result.startswith("Error"):
+                            message_placeholder.error(result)
+                            st.session_state.messages.append({"role": "assistant", "content": result})
+                        elif isinstance(result, pd.DataFrame):
+                            # 3. Generate Natural Language Answer (even if DF is empty, to allow fallback knowledge)
+                            nl_response = generate_natural_answer(prompt, sql_query, result, selected_model, provider, st.session_state.messages[:-1])
+                            if isinstance(nl_response, str) and nl_response.startswith("Error"):
+                                message_placeholder.error(nl_response)
+                                st.session_state.messages.append({"role": "assistant", "content": nl_response})
+                            else:
+                                message_placeholder.markdown(nl_response)
+                                st.session_state.messages.append({"role": "assistant", "content": nl_response})
+                                if not result.empty:
+                                    with st.expander("View Technical Details (SQL & Data)"):
+                                        st.code(sql_query, language="sql")
+                                        st.dataframe(result, width='stretch')
+                    
                     else:
-                        # Ensure we have a SELECT query (very basic check)
-                        if not isinstance(sql_query, str) or "SELECT" not in sql_query.upper():
-                            # LLM didn't return a SQL query — show feedback
-                            fallback = "I couldn't generate a SQL query from that prompt. Try a more specific question or check the model settings."
-                            message_placeholder.info(fallback)
-                            st.session_state.messages.append({"role": "assistant", "content": fallback})
-                        else:
-                            # 2. Execute SQL
-                            result = run_query(sql_query)
+                        # Fallback for unexpected response format
+                        message_placeholder.markdown(ai_raw_response)
+                        st.session_state.messages.append({"role": "assistant", "content": ai_raw_response})
 
-                            # If run_query returned an error string, display it
-                            if isinstance(result, str) and result.startswith("Error"):
-                                message_placeholder.error(result)
-                                st.session_state.messages.append({"role": "assistant", "content": result})
-                            elif isinstance(result, pd.DataFrame):
-                                if result.empty:
-                                    nores = "I couldn't find any records."
-                                    message_placeholder.markdown(nores)
-                                    st.session_state.messages.append({"role": "assistant", "content": nores})
-                                else:
-                                    # 3. Generate Natural Language Answer
-                                    nl_response = generate_natural_answer(prompt, sql_query, result, selected_model, provider, st.session_state.messages[:-1])
-                                    if isinstance(nl_response, str) and nl_response.startswith("Error"):
-                                        message_placeholder.error(nl_response)
-                                        st.session_state.messages.append({"role": "assistant", "content": nl_response})
-                                    else:
-                                        message_placeholder.markdown(nl_response)
-                                        st.session_state.messages.append({"role": "assistant", "content": nl_response})
-                                        with st.expander("View Technical Details (SQL & Data)"):
-                                            st.code(sql_query, language="sql")
-                                            st.dataframe(result, width='stretch')
                 except Exception as e:
                     err = f"An unexpected error occurred: {e}"
                     message_placeholder.error(err)
