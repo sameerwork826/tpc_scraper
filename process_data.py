@@ -55,6 +55,32 @@ def init_db():
         )
     ''')
     
+    # Create tables if not exist (including company_ctc/visits which might be persistent)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS company_ctc (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_name TEXT UNIQUE,
+            ctc_lpa REAL,
+            ctc_inr REAL,
+            inhand_lpa REAL,
+            inhand_inr REAL
+        )
+    ''')
+    
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS company_visits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_name TEXT,
+            role TEXT,
+            placement_year TEXT,
+            ctc_lpa REAL,
+            ctc_inr REAL,
+            location TEXT,
+            jd_link TEXT,
+            eligibility_cgpa REAL
+        )
+    ''')
+
     # Master Student Table (Unique Identity)
     c.execute('''
         CREATE TABLE IF NOT EXISTS students (
@@ -79,6 +105,27 @@ def init_db():
             FOREIGN KEY(event_id) REFERENCES events(id)
         )
     ''')
+    # Create Denormalized VIEW for Analysis
+    try:
+        c.execute("DROP VIEW IF EXISTS student_placement_summary")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("DROP TABLE IF EXISTS student_placement_summary")
+    except sqlite3.OperationalError:
+        pass
+        
+    c.execute("""
+        CREATE VIEW student_placement_summary AS
+        SELECT s.name, s.roll_no, s.branch, s.year, s.cpi, s.email,
+               e.company_name, e.event_type, e.topic_url, e.raw_filename,
+               cc.ctc_lpa, cc.ctc_inr, cc.inhand_lpa, cc.inhand_inr
+        FROM students s
+        JOIN event_students es ON s.id = es.student_id
+        JOIN events e ON es.event_id = e.id
+        LEFT JOIN company_ctc cc ON e.company_name = cc.company_name
+    """)
+
     conn.commit()
     return conn
 
